@@ -49,16 +49,16 @@ Dota статистика v4 — без слэш-команд, всё через
     официальная агрегированная статистика по игрокам на этом герое.
   - Список ошибок (⚠️ Возможные проблемы) строится ЖЁСТКИМИ правилами
     в detect_issues() — это работает ВСЕГДА, даже без LLM-ключа.
-  - Текстовый разбор от LLM (если настроен DEEPSEEK_API_KEY) получает на
-    вход ТОЛЬКО эти же посчитанные факты и просто связно их пересказывает —
-    модель не ищет ничего в интернете и не должна придумывать цифры сверх
-    переданных.
+  - Текстовый разбор от LLM (если настроен GROQ_API_KEY или DEEPSEEK_API_KEY)
+    получает на вход ТОЛЬКО эти же посчитанные факты и просто связно их
+    пересказывает — модель не ищет ничего в интернете и не должна
+    придумывать цифры сверх переданных.
 ------------------------------------------------------------------
 
 Установка:
   pip install aiohttp discord.py
   Впишите STEAM_API_KEY (обязательно для статуса/доски/пати) и
-  DEEPSEEK_API_KEY (опционально, для текстового разбора матчей) ниже.
+  GROQ_API_KEY (опционально, бесплатно, для текстового разбора матчей) ниже.
   await bot.load_extension("dota_stats_v3")
 """
 
@@ -81,9 +81,13 @@ DB_PATH = Path(__file__).parent / "dota_stats.db"
 STEAM_API_KEY = "C5BD806939B9711D9722489FB77DF417"   # https://steamcommunity.com/dev/apikey (обязательно)
 
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
-LLM_PROVIDER = "deepseek"  # "deepseek" | "none" (none = только жёсткие правила, без текста)
+LLM_PROVIDER = "groq"  # "groq" | "deepseek" | "none" (none = только жёсткие правила, без текста)
 
-DEEPSEEK_API_KEY = "sk-749ec2eb7d244b0fbb8cf6f314441528"   # https://platform.deepseek.com/api_keys
+GROQ_API_KEY = "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"           # https://console.groq.com/keys (бесплатно, без карты)
+GROQ_MODEL = "llama-3.3-70b-versatile"       # актуальную модель проверьте на console.groq.com/docs/models
+GROQ_API_BASE = "https://api.groq.com/openai/v1"  # OpenAI-совместимый эндпоинт
+
+DEEPSEEK_API_KEY = "YOUR_DEEPSEEK_API_KEY"   # https://platform.deepseek.com/api_keys (платно)
 DEEPSEEK_MODEL = "deepseek-chat"             # актуальная модель — проверьте на platform.deepseek.com/docs
 DEEPSEEK_API_BASE = "https://api.deepseek.com"  # OpenAI-совместимый эндпоинт
 
@@ -477,8 +481,10 @@ def detect_issues(facts: dict) -> list[str]:
 
 class MatchReviewWriter:
     """Дополняет факты + список проблем связным текстом через LLM.
-    Провайдер — DeepSeek, эндпоинт OpenAI-совместимый
-    (api.deepseek.com/chat/completions), дёшево (платно, но по факту копейки).
+    Поддерживает два провайдера (переключаются константой LLM_PROVIDER),
+    оба через OpenAI-совместимый /chat/completions:
+      - "groq":     бесплатно, без карты, быстрый (console.groq.com)
+      - "deepseek": платно (по факту очень дёшево)
     Если провайдер "none", ключ не задан, или запрос упал — просто не
     добавляет текстовый блок: embed с фактами и detect_issues() всё равно
     уходит игроку, это никогда не блокирует основную функцию."""
@@ -487,7 +493,9 @@ class MatchReviewWriter:
         self.provider = provider
         self.session: aiohttp.ClientSession | None = None
 
-        if provider == "deepseek":
+        if provider == "groq":
+            self.enabled = ENABLE_LLM_REVIEW and bool(GROQ_API_KEY) and "YOUR_" not in GROQ_API_KEY
+        elif provider == "deepseek":
             self.enabled = ENABLE_LLM_REVIEW and bool(DEEPSEEK_API_KEY) and "YOUR_" not in DEEPSEEK_API_KEY
         else:
             self.enabled = False
@@ -523,9 +531,42 @@ class MatchReviewWriter:
         if not self.enabled:
             return None
         prompt = self._build_prompt(facts, issues)
+        if self.provider == "groq":
+            return await self._write_groq(prompt)
         if self.provider == "deepseek":
             return await self._write_deepseek(prompt)
         return None
+
+    async def _write_groq(self, prompt: str) -> str | None:
+        # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
+        # messages. Модель и базовый URL — см. константы вверху файла.
+        url = f"{GROQ_API_BASE}/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "Ты — тренер по Dota 2, отвечаешь на русском."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7,
+        }
+        try:
+            s = await self._s()
+            async with s.post(url, headers=headers, json=payload,
+                               timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    if DEBUG_LOG:
+                        print(f"[LLM/groq] статус {r.status}: {await r.text()}")
+                    return None
+                data = await r.json()
+            choices = data.get("choices", [])
+            if not choices:
+                return None
+            return choices[0].get("message", {}).get("content", "").strip() or None
+        except Exception as e:
+            if DEBUG_LOG:
+                print(f"[LLM/groq] ошибка: {e}")
+            return None
 
     async def _write_deepseek(self, prompt: str) -> str | None:
         # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
