@@ -219,20 +219,35 @@ async def post_pinned_info(channel: discord.TextChannel, title: str, description
     """Шлёт и закрепляет embed-справку в канале (опционально — с кнопками),
     если бот уже не отправлял туда именно ЭТО сообщение (проверяем по
     автору + заголовку embed, а не просто "есть ли в канале хоть один пин" —
-    иначе любой посторонний закреп в канале, например от людей или от
-    другого вызова этой же функции для другого текста, ложно блокирует
-    создание кнопки в этом канале)."""
+    иначе любой посторонний закреп в канале ложно блокирует создание кнопки
+    в этом канале).
+
+    Если находим своё старое сообщение с тем же заголовком, но БЕЗ кнопок
+    (например, раньше отправили без view, а теперь view появился в коде) —
+    пересоздаём его, а не молча пропускаем навсегда."""
     try:
         pins = await channel.pins()
     except discord.Forbidden:
         return
     me = channel.guild.me
-    already_posted = any(
-        p.author.id == me.id and p.embeds and p.embeds[0].title == title
-        for p in pins
+    existing = next(
+        (p for p in pins if p.author.id == me.id and p.embeds and p.embeds[0].title == title),
+        None,
     )
-    if already_posted:
-        return
+    if existing:
+        needs_view = view is not None
+        has_components = bool(existing.components)
+        if not needs_view or has_components:
+            return  # уже есть актуальная версия — ничего не делаем
+        try:
+            await existing.unpin()
+        except discord.Forbidden:
+            pass
+        try:
+            await existing.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
     embed = discord.Embed(title=title, description=description, color=0x8B4513)
     msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
     try:

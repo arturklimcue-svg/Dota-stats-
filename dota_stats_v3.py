@@ -112,16 +112,16 @@ DB_PATH = Path(__file__).parent / "dota_stats.db"
 # --- настройте под себя ---
 # Ключи теперь читаются ТОЛЬКО из переменных окружения (не хранятся в коде/репозитории).
 # Задайте их на хостинге так же, как DISCORD_BOT_TOKEN — см. README.md.
-STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "")   # https://steamcommunity.com/dev/apikey (обязательно)
+STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "").strip()   # https://steamcommunity.com/dev/apikey (обязательно)
 
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
 LLM_PROVIDER = "groq"  # "groq" | "deepseek" | "none" (none = только жёсткие правила, без текста)
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")     # https://console.groq.com/keys (бесплатно, без карты)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()     # https://console.groq.com/keys (бесплатно, без карты)
 GROQ_MODEL = "llama-3.3-70b-versatile"       # актуальную модель проверьте на console.groq.com/docs/models
 GROQ_API_BASE = "https://api.groq.com/openai/v1"  # OpenAI-совместимый эндпоинт
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")  # https://platform.deepseek.com/api_keys (платно)
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()  # https://platform.deepseek.com/api_keys (платно)
 DEEPSEEK_MODEL = "deepseek-chat"             # актуальная модель — проверьте на platform.deepseek.com/docs
 DEEPSEEK_API_BASE = "https://api.deepseek.com"  # OpenAI-совместимый эндпоинт
 
@@ -612,6 +612,11 @@ class SteamAPI:
         params = {"key": self.api_key, "steamids": ",".join(str(i) for i in steam_ids64)}
         async with s.get(url, params=params) as r:
             if r.status != 200:
+                if DEBUG_LOG:
+                    body = await r.text()
+                    key_hint = "ПУСТОЙ" if not self.api_key else f"задан, длина {len(self.api_key)}"
+                    print(f"[STEAM] GetPlayerSummaries вернул статус {r.status}, ключ: {key_hint}, "
+                          f"ответ: {body[:300]}")
                 return []
             data = await r.json()
             return data.get("response", {}).get("players", [])
@@ -926,6 +931,32 @@ class MatchReviewWriter:
             if DEBUG_LOG:
                 print(f"[LLM/deepseek] ошибка: {e}")
             return None
+
+
+    async def self_test(self) -> None:
+        """Разовая проверка ключа при старте бота — чтобы не ждать реального
+        матча, чтобы узнать, работает ли LLM. Печатает результат в консоль."""
+        if self.provider == "none":
+            print("[LLM] LLM_PROVIDER = \"none\" — текстовый разбор отключён, это ок.")
+            return
+        key = GROQ_API_KEY if self.provider == "groq" else DEEPSEEK_API_KEY
+        if not key:
+            print(f"[LLM] ⚠️ LLM_PROVIDER = \"{self.provider}\", но соответствующий "
+                  f"ключ пустой — переменная окружения не задана или .env не подхватился.")
+            return
+        masked = f"{key[:4]}...{key[-4:]} (длина {len(key)})" if len(key) > 8 else "слишком короткий, подозрительно"
+        result = await self.write_review(
+            {"hero": "Test", "won": True, "kills": 0, "deaths": 0, "assists": 0,
+             "duration_min": 1, "gpm": 0, "gpm_median": 0, "xpm": 0, "xpm_median": 0,
+             "lh_per_min": 0, "lh_per_min_median": 0, "hero_damage": 0, "tower_damage": 0,
+             "hero_healing": 0, "obs_placed": 0, "sen_placed": 0, "stages": []},
+            ["тестовый запрос при старте бота"])
+        if result:
+            print(f"[LLM] ✅ Провайдер \"{self.provider}\" работает, ключ: {masked}")
+        else:
+            print(f"[LLM] ❌ Провайдер \"{self.provider}\" НЕ отвечает корректно, ключ: {masked}. "
+                  f"Смотрите строку выше со статусом ответа API — там точная причина "
+                  f"(401 = сам ключ неверный/отозван, не проблема кода).")
 
 
 match_reviewer = MatchReviewWriter(LLM_PROVIDER)
@@ -1302,6 +1333,7 @@ class DotaStats(commands.Cog):
         # обновления кода — при каждом рестарте бота уже существующая
         # панель сама перерисовывается с актуальным набором кнопок
         self.bot.loop.create_task(self._refresh_dashboard_panels_on_start())
+        self.bot.loop.create_task(match_reviewer.self_test())
 
     async def _refresh_dashboard_panels_on_start(self):
         await self.bot.wait_until_ready()
