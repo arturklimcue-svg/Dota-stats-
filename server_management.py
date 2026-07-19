@@ -217,13 +217,21 @@ async def get_or_create_role(guild: discord.Guild, name: str, **kwargs) -> disco
 async def post_pinned_info(channel: discord.TextChannel, title: str, description: str,
                             view: discord.ui.View = None):
     """Шлёт и закрепляет embed-справку в канале (опционально — с кнопками),
-    если там ещё нет закрепа (чтобы повторный запуск !dota_server_setup
-    не плодил дубликаты)."""
+    если бот уже не отправлял туда именно ЭТО сообщение (проверяем по
+    автору + заголовку embed, а не просто "есть ли в канале хоть один пин" —
+    иначе любой посторонний закреп в канале, например от людей или от
+    другого вызова этой же функции для другого текста, ложно блокирует
+    создание кнопки в этом канале)."""
     try:
         pins = await channel.pins()
     except discord.Forbidden:
         return
-    if pins:
+    me = channel.guild.me
+    already_posted = any(
+        p.author.id == me.id and p.embeds and p.embeds[0].title == title
+        for p in pins
+    )
+    if already_posted:
         return
     embed = discord.Embed(title=title, description=description, color=0x8B4513)
     msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
@@ -932,8 +940,13 @@ class ServerManagement(commands.Cog):
         jtc_category = discord.utils.get(guild.categories, name=JOIN_TO_CREATE_CATEGORY)
         if not jtc_category:
             jtc_category = await guild.create_category(JOIN_TO_CREATE_CATEGORY)
-        if not discord.utils.get(guild.voice_channels, name=JOIN_TO_CREATE_CHANNEL):
-            await guild.create_voice_channel(JOIN_TO_CREATE_CHANNEL, category=jtc_category)
+        jtc_hub = discord.utils.get(guild.voice_channels, name=JOIN_TO_CREATE_CHANNEL)
+        if not jtc_hub:
+            jtc_hub = await guild.create_voice_channel(JOIN_TO_CREATE_CHANNEL, category=jtc_category)
+        # ВАЖНО: хаб сам почти всегда пустеет через секунду после захода
+        # (человека сразу переносит в новый temp-канал) — без защиты общий
+        # листенер автоудаления снёс бы сам хаб при первом же использовании
+        self.db.protect_voice_target(jtc_hub.id, guild.id, "channel")
         await jtc_category.set_permissions(everyone, view_channel=False)
         await jtc_category.set_permissions(verified, view_channel=True, connect=True)
 
@@ -963,8 +976,13 @@ class ServerManagement(commands.Cog):
             if not category.text_channels:
                 await guild.create_text_channel("⚔-чат", category=category)
             for vc_name in RANK_VOICE_NAMES:
-                if not discord.utils.get(category.voice_channels, name=vc_name):
-                    await guild.create_voice_channel(vc_name, category=category)
+                vc = discord.utils.get(category.voice_channels, name=vc_name)
+                if not vc:
+                    vc = await guild.create_voice_channel(vc_name, category=category)
+                # ВАЖНО: это постоянные каналы, а не join-to-create — без защиты
+                # их снесёт общий листенер автоудаления пустых войсов в
+                # dota_stats_v3.py (on_voice_state_update) при первом же опустении
+                self.db.protect_voice_target(vc.id, guild.id, "channel")
 
         # ---- 🛠 Модерация (staff-only) ----
         staff_role = discord.utils.get(guild.roles, name=STAFF_ROLE_NAME)
