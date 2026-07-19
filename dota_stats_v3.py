@@ -107,7 +107,28 @@ from discord.ext import commands, tasks
 OPENDOTA_BASE = "https://api.opendota.com/api"
 STEAM_API_BASE = "https://api.steampowered.com"
 STEAM64_OFFSET = 76561197960265728
-DB_PATH = Path(__file__).parent / "dota_stats.db"
+def _resolve_db_path() -> Path:
+    """На bothost.ru (тариф Basic/Pro) папка /app/data — персистентное
+    хранилище: bothost специально исключает её из git-синка и НЕ трогает
+    при обновлении из репозитория/перезапуске контейнера (см.
+    bothost.ru/docs/database-storage). Раньше база лежала рядом с кодом
+    (Path(__file__).parent) — а это как раз то, что перезаписывается при
+    каждом git-деплое, отсюда и терялись привязанные игроки при живых
+    Discord-ролях (роль в Discord не пропадает, а строка в SQLite — да).
+    Переменная окружения DB_PATH позволяет переопределить путь вручную,
+    если хостинг другой."""
+    env_path = os.environ.get("DB_PATH", "").strip()
+    if env_path:
+        return Path(env_path)
+    bothost_data_dir = Path("/app/data")
+    try:
+        bothost_data_dir.mkdir(parents=True, exist_ok=True)
+        return bothost_data_dir / "dota_stats.db"
+    except OSError:
+        return Path(__file__).parent / "dota_stats.db"  # локальный запуск не на bothost
+
+
+DB_PATH = _resolve_db_path()
 
 # --- настройте под себя ---
 # Ключи теперь читаются ТОЛЬКО из переменных окружения (не хранятся в коде/репозитории).
