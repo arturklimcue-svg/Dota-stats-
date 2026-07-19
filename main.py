@@ -12,6 +12,19 @@ import os
 import discord
 from discord.ext import commands
 
+# ВАЖНО: .env должен подгружаться ДО импорта/загрузки dota_stats_v3 —
+# там ключи (GROQ_API_KEY и т.д.) читаются в константы на уровне модуля,
+# то есть один раз при импорте. Если load_dotenv() вызвать позже или не
+# вызвать вообще, os.environ.get(...) в dota_stats_v3.py увидит пустую
+# строку, даже если сам .env-файл на месте и заполнен корректно.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("[WARN] python-dotenv не установлен — .env не подхватится, "
+          "переменные окружения должны быть заданы на уровне хостинга/ОС "
+          "(pip install python-dotenv, если нужен именно файл .env)")
+
 intents = discord.Intents.default()
 intents.members = True          # нужно для on_member_join (выдача роли Unverified)
 intents.message_content = True  # нужно, чтобы работали префиксные команды (!dota_setup и т.п.)

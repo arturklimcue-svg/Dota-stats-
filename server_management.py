@@ -307,11 +307,26 @@ class VerifyModal(discord.ui.Modal, title="Верификация — привя
         unverified = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
         verified = await get_or_create_role(guild, VERIFIED_ROLE)
 
-        if unverified and unverified in member.roles:
-            await member.remove_roles(unverified, reason="Верификация пройдена")
-        await member.add_roles(verified, reason="Верификация пройдена")
-
-        rank_role_name = await assign_rank_role(member, account_id)
+        try:
+            if unverified and unverified in member.roles:
+                await member.remove_roles(unverified, reason="Верификация пройдена")
+            await member.add_roles(verified, reason="Верификация пройдена")
+            rank_role_name = await assign_rank_role(member, account_id)
+        except discord.Forbidden:
+            # Самая частая причина: роль бота стоит НИЖЕ ролей Verified/ранговых
+            # в иерархии Server Settings -> Roles, либо у бота нет права Manage Roles.
+            await interaction.response.send_message(
+                "SteamID сохранил, но не смог выдать роль — у бота не хватает прав "
+                "(Manage Roles) или его роль стоит ниже роли Verified/ранговых в "
+                "иерархии сервера. Попросите администратора поднять роль бота выше "
+                "в Server Settings -> Roles и нажмите кнопку ещё раз.",
+                ephemeral=True)
+            log_ch = discord.utils.get(guild.text_channels, name=MOD_LOG_CHANNEL)
+            if log_ch:
+                await log_ch.send(
+                    f"⚠️ Не удалось выдать роль {member.mention} — недостаточно прав "
+                    f"у бота (проверьте позицию роли бота в иерархии).")
+            return
 
         persona = profile["profile"].get("personaname", "игрок")
         note = ""
@@ -763,6 +778,58 @@ class ServerManagement(commands.Cog):
         await ctx.trigger_typing()
         embed = await build_leaderboard_embed(self.db, ctx.guild)
         await ctx.send(embed=embed)
+
+    # ---------- проверка базы привязанных игроков ----------
+
+    @commands.command(name="dota_players")
+    @commands.has_permissions(manage_roles=True)
+    async def list_players(self, ctx: commands.Context):
+        """Показывает всех привязанных в базе: есть ли ещё на сервере,
+        совпадает ли выданная роль с тем, что сейчас говорит OpenDota.
+        Полезно для диагностики верификации и рассинхрона рангов."""
+        players = self.db.all_players()
+        if not players:
+            await ctx.send("В базе пока нет ни одного привязанного SteamID.")
+            return
+
+        await ctx.trigger_typing()
+        lines = []
+        left_server = 0
+        mismatched = 0
+        for discord_id, account_id, steam_id64 in players:
+            member = ctx.guild.get_member(discord_id)
+            if not member:
+                left_server += 1
+                lines.append(f"❔ <@{discord_id}> (account_id {account_id}) — покинул сервер")
+                continue
+
+            profile = await od.get(f"/players/{account_id}")
+            expected_role = tier_to_role_name((profile or {}).get("rank_tier")) or UNRANKED_ROLE
+            has_role = any(r.name == expected_role for r in member.roles)
+            is_verified = any(r.name == VERIFIED_ROLE for r in member.roles)
+
+            status = "✅" if (has_role and is_verified) else "⚠️"
+            if not has_role:
+                mismatched += 1
+            lines.append(
+                f"{status} {member.mention} — account_id {account_id}, "
+                f"должна быть роль **{expected_role}**{'' if has_role else ' (НЕ выдана!)'}"
+                f"{'' if is_verified else ', роли Verified нет'}"
+            )
+            await asyncio.sleep(0.3)  # не долбить OpenDota подряд
+
+        header = (f"Всего привязано: {len(players)}, ушли с сервера: {left_server}, "
+                  f"расхождение роли: {mismatched}\n\n")
+
+        # Discord режет сообщения на 2000 символов — бьём на части
+        chunk = header
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await ctx.send(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await ctx.send(chunk)
 
     # ---------- разовая настройка сервера ----------
 

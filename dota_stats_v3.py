@@ -1298,6 +1298,33 @@ class DotaStats(commands.Cog):
             self.bot.add_view(DuelReportView(self.db, duel["id"]))
         for duel in self.db.duels_by_status(["disputed"]):
             self.bot.add_view(DuelAdminResolveView(self.db, duel["id"]))
+        # чтобы не приходилось руками гонять !dota_setup после каждого
+        # обновления кода — при каждом рестарте бота уже существующая
+        # панель сама перерисовывается с актуальным набором кнопок
+        self.bot.loop.create_task(self._refresh_dashboard_panels_on_start())
+
+    async def _refresh_dashboard_panels_on_start(self):
+        await self.bot.wait_until_ready()
+        embed = discord.Embed(
+            title="🎮 Dota Stats",
+            description="Нажмите кнопку ниже, чтобы получить свою статистику. "
+                        "Ответы видны только вам.",
+            color=0x8B4513,
+        )
+        for guild_id, channel_id, message_id in self.db.all_dashboards():
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.edit(embed=embed, view=DashboardView(self.db))
+                if DEBUG_LOG:
+                    print(f"[DASHBOARD] панель в канале {channel_id} обновлена текущим набором кнопок")
+            except discord.NotFound:
+                pass  # сообщение удалили руками — дождёмся ручного !dota_setup
+            except discord.Forbidden:
+                if DEBUG_LOG:
+                    print(f"[DASHBOARD] нет прав редактировать панель в канале {channel_id}")
 
     # ---------- 1+2+3: статус "в игре", доска, детект пати ----------
 
