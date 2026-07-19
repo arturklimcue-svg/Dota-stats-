@@ -798,8 +798,8 @@ class ServerManagement(commands.Cog):
     @commands.command(name="leaderboard")
     async def leaderboard(self, ctx: commands.Context):
         """Топ по винрейту среди привязанных участников этого сервера."""
-        await ctx.trigger_typing()
-        embed = await build_leaderboard_embed(self.db, ctx.guild)
+        async with ctx.typing():
+            embed = await build_leaderboard_embed(self.db, ctx.guild)
         await ctx.send(embed=embed)
 
     # ---------- проверка базы привязанных игроков ----------
@@ -815,7 +815,7 @@ class ServerManagement(commands.Cog):
             await ctx.send("В базе пока нет ни одного привязанного SteamID.")
             return
 
-        await ctx.trigger_typing()
+        await ctx.typing()
         lines = []
         left_server = 0
         mismatched = 0
