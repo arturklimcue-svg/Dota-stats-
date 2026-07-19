@@ -83,7 +83,7 @@ STEAM_API_KEY = "C5BD806939B9711D9722489FB77DF417"   # https://steamcommunity.co
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
 LLM_PROVIDER = "groq"  # "groq" | "deepseek" | "none" (none = только жёсткие правила, без текста)
 
-GROQ_API_KEY = "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"           # https://console.groq.com/keys (бесплатно, без карты)
+GROQ_API_KEY = "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	"           # https://console.groq.com/keys (бесплатно, без карты)
 GROQ_MODEL = "llama-3.3-70b-versatile"       # актуальную модель проверьте на console.groq.com/docs/models
 GROQ_API_BASE = "https://api.groq.com/openai/v1"  # OpenAI-совместимый эндпоинт
 
@@ -106,6 +106,22 @@ def to_account_id(steam_id) -> int:
 def to_steam64(steam_id) -> int:
     steam_id = int(steam_id)
     return steam_id if steam_id > STEAM64_OFFSET else steam_id + STEAM64_OFFSET
+
+
+def _truncate_for_embed(text: str, limit: int = 1024) -> str:
+    """Обрезает текст под лимит поля эмбеда Discord (1024 символа), стараясь
+    не рвать текст посреди слова/предложения — обрезает по последней точке
+    или пробелу перед лимитом, если это не теряет слишком много текста."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    last_dot = cut.rfind(". ")
+    if last_dot > limit * 0.6:
+        return cut[:last_dot + 1]
+    last_space = cut.rfind(" ")
+    if last_space > limit * 0.6:
+        return cut[:last_space] + "…"
+    return cut + "…"
 
 
 # ---------------- storage ----------------
@@ -380,6 +396,55 @@ def _closest_percentile_value(benchmark_list: list[dict], target: float = 0.5):
     return closest.get("value")
 
 
+# Границы стадий в минутах — общепринятое деление матча Dota на фазы
+STAGE_BOUNDARIES = [("Ранняя игра (0-10 мин)", 0, 10),
+                     ("Мид-гейм (10-25 мин)", 10, 25),
+                     ("Поздняя игра (25+ мин)", 25, None)]
+
+
+def _stage_rate(cumulative: list, start_min: int, end_min: int | None, duration_min: float) -> float | None:
+    """cumulative — массив накопленных значений (gold_t/xp_t/lh_t из OpenDota,
+    по минутам матча). Считает среднюю скорость набора за отрезок [start, end)."""
+    if not cumulative:
+        return None
+    end_min = duration_min if end_min is None else min(end_min, duration_min)
+    if end_min <= start_min or start_min >= len(cumulative):
+        return None
+    start_idx = int(start_min)
+    end_idx = min(int(end_min), len(cumulative) - 1)
+    if end_idx <= start_idx:
+        return None
+    return (cumulative[end_idx] - cumulative[start_idx]) / (end_idx - start_idx)
+
+
+def _build_stage_breakdown(player: dict, duration_min: float) -> list[dict]:
+    """Разбивает матч на 3 стадии и считает GPM/XPM/добивания-в-минуту
+    в каждой отдельно — на основе поминутных массивов gold_t/xp_t/lh_t,
+    которые отдаёт OpenDota /matches/{id}. Без этого LLM пришлось бы
+    угадывать, где именно игрок отставал — так у него на входе реальные
+    цифры по каждой фазе, а не только средние по матчу целиком."""
+    gold_t = player.get("gold_t") or []
+    xp_t = player.get("xp_t") or []
+    lh_t = player.get("lh_t") or []
+
+    stages = []
+    for title, start, end in STAGE_BOUNDARIES:
+        if start >= duration_min:
+            continue
+        gpm = _stage_rate(gold_t, start, end, duration_min)
+        xpm = _stage_rate(xp_t, start, end, duration_min)
+        lhpm = _stage_rate(lh_t, start, end, duration_min)
+        if gpm is None and xpm is None and lhpm is None:
+            continue
+        stages.append({
+            "title": title,
+            "gpm": round(gpm) if gpm is not None else None,
+            "xpm": round(xpm) if xpm is not None else None,
+            "lh_per_min": round(lhpm, 1) if lhpm is not None else None,
+        })
+    return stages
+
+
 async def build_match_facts(account_id: int, match_id: int,
                              known_account_ids: dict[int, int] | None = None) -> dict | None:
     """Собирает объективные цифры по матчу конкретного игрока + сравнение
@@ -441,6 +506,7 @@ async def build_match_facts(account_id: int, match_id: int,
         "hero_healing": player.get("hero_healing", 0),
         "obs_placed": player.get("obs_placed", 0),
         "sen_placed": player.get("sen_placed", 0),
+        "stages": _build_stage_breakdown(player, duration_min),
     }
 
 
@@ -508,22 +574,51 @@ class MatchReviewWriter:
     @staticmethod
     def _build_prompt(facts: dict, issues: list[str]) -> str:
         result_word = "Победа" if facts["won"] else "Поражение"
+
+        stage_lines = []
+        for st in facts.get("stages", []):
+            parts = [st["title"] + ":"]
+            if st["gpm"] is not None:
+                parts.append(f"GPM {st['gpm']}")
+            if st["xpm"] is not None:
+                parts.append(f"XPM {st['xpm']}")
+            if st["lh_per_min"] is not None:
+                parts.append(f"добиваний/мин {st['lh_per_min']}")
+            stage_lines.append(" ".join(parts))
+        stages_block = "\n".join(stage_lines) if stage_lines else "Нет данных по стадиям (короткий матч)."
+
         return (
-            "Ты — тренер по Dota 2. Ниже РЕАЛЬНЫЕ факты одного конкретного матча игрока "
-            "(посчитаны программой из OpenDota, не придумывай цифры сверх них) и уже "
-            "найденные автоматически проблемы. Твоя задача — написать связный, подробный "
-            "разбор на русском (8-12 предложений): что получилось, в чём конкретно ошибки "
-            "(опираясь на переданный список), и 2-3 практических совета на будущее. "
-            "Пиши прямо и по делу, как тренер, а не как отчёт.\n\n"
+            "Ты — тренер по Dota 2, разбираешь матч со своим учеником. Ниже РЕАЛЬНЫЕ "
+            "факты одного конкретного матча (посчитаны программой из OpenDota — не "
+            "придумывай цифры и события сверх переданных) и уже найденные автоматически "
+            "проблемы.\n\n"
+            "Напиши разбор от первого лица, как будто сам игрок вспоминает и оценивает "
+            "свою игру («в начале я...», «к середине матча стало...», «в конце игры я...»), "
+            "но опирайся СТРОГО на переданные цифры, а не на выдуманные события боя. "
+            "Структура ответа — по стадиям, каждая отдельным коротким абзацем (2-3 "
+            "предложения на стадию):\n"
+            "1. Ранняя игра — что показывают GPM/XPM/добивания на этом отрезке относительно "
+            "медианы по герою, была ли это уже проблемная зона.\n"
+            "2. Мид-гейм — то же самое, отметь, стало ли лучше или хуже по сравнению с "
+            "ранней игрой.\n"
+            "3. Поздняя игра — то же самое, плюс как итоговый результат (победа/поражение) "
+            "и KDA сходятся с этой динамикой.\n"
+            "В конце — короткий блок «Что подтянуть» из 2-3 конкретных практических советов, "
+            "явно привязанных к стадии, где была найдена проблема (например: "
+            "«в ранней игре — на 0-10 минуте фокусироваться на линии и добиваниях»).\n"
+            "Не повторяй сухие цифры построчно — уже показаны отдельно в эмбеде, здесь нужна "
+            "именно связная интерпретация. Пиши на русском, прямо и по делу.\n\n"
             f"Герой: {facts['hero']}, результат: {result_word}, "
             f"KDA {facts['kills']}/{facts['deaths']}/{facts['assists']}, "
             f"длительность {facts['duration_min']} мин.\n"
-            f"GPM: {facts['gpm']} (медиана по герою {facts['gpm_median']})\n"
-            f"XPM: {facts['xpm']} (медиана {facts['xpm_median']})\n"
-            f"Добивания/мин: {facts['lh_per_min']} (медиана {facts['lh_per_min_median']})\n"
+            f"GPM за матч: {facts['gpm']} (медиана по герою {facts['gpm_median']})\n"
+            f"XPM за матч: {facts['xpm']} (медиана {facts['xpm_median']})\n"
+            f"Добивания/мин за матч: {facts['lh_per_min']} (медиана {facts['lh_per_min_median']})\n"
             f"Урон герою: {facts['hero_damage']}, урон башням: {facts['tower_damage']}, "
             f"лечение: {facts['hero_healing']}\n"
             f"Вардов поставлено: {facts['obs_placed']} obs / {facts['sen_placed']} sentry\n\n"
+            f"Разбивка по стадиям игры (реальные цифры по временным отрезкам матча):\n"
+            f"{stages_block}\n\n"
             "Уже найденные автоматически проблемы:\n" + "\n".join(issues)
         )
 
@@ -896,7 +991,8 @@ class DotaStats(commands.Cog):
             mentions = ", ".join(f"<@{did}>" for did in facts["party_teammates"])
             embed.add_field(name="🎉 Играли вместе (пати)", value=mentions, inline=False)
         if review_text:
-            embed.add_field(name="🧠 Разбор от тренера (LLM)", value=review_text[:1000], inline=False)
+            embed.add_field(name="🧠 Разбор от тренера (LLM)", value=_truncate_for_embed(review_text, 1024),
+                             inline=False)
         return embed
 
     async def build_match_review(self, discord_id: int, account_id: int, match_id: int) -> discord.Embed | None:
