@@ -20,9 +20,9 @@ Dota статистика v4 — без слэш-команд, всё через
          в базу — считает факты (KDA, GPM/XPM/CS против медианы по герою,
          урон, вардение), ВСЕГДА показывает список конкретных проблем по
          жёстким правилам (работает без всякого LLM), и ДОПОЛНИТЕЛЬНО, если
-         настроен LLM-ключ, добавляет связный текстовый разбор поверх тех же
-         фактов. Результат шлётся в личку игроку (с fallback в общий канал,
-         если ЛС закрыты).
+         настроен LLM-ключ (DeepSeek), добавляет связный текстовый разбор
+         поверх тех же фактов. Результат шлётся в личку игроку (с fallback
+         в общий канал, если ЛС закрыты).
       5) Еженедельный лидерборд — раз в неделю (по понедельникам) в канал
          с панелью автоматически постится топ участников по количеству игр
          и винрейту за последние 7 дней. Плюс есть кнопка для лидерборда
@@ -49,7 +49,7 @@ Dota статистика v4 — без слэш-команд, всё через
     официальная агрегированная статистика по игрокам на этом герое.
   - Список ошибок (⚠️ Возможные проблемы) строится ЖЁСТКИМИ правилами
     в detect_issues() — это работает ВСЕГДА, даже без LLM-ключа.
-  - Текстовый разбор от LLM (если настроен GEMINI_API_KEY) получает на
+  - Текстовый разбор от LLM (если настроен DEEPSEEK_API_KEY) получает на
     вход ТОЛЬКО эти же посчитанные факты и просто связно их пересказывает —
     модель не ищет ничего в интернете и не должна придумывать цифры сверх
     переданных.
@@ -58,7 +58,7 @@ Dota статистика v4 — без слэш-команд, всё через
 Установка:
   pip install aiohttp discord.py
   Впишите STEAM_API_KEY (обязательно для статуса/доски/пати) и
-  GEMINI_API_KEY (опционально, для текстового разбора матчей) ниже.
+  DEEPSEEK_API_KEY (опционально, для текстового разбора матчей) ниже.
   await bot.load_extension("dota_stats_v3")
 """
 
@@ -81,16 +81,11 @@ DB_PATH = Path(__file__).parent / "dota_stats.db"
 STEAM_API_KEY = "C5BD806939B9711D9722489FB77DF417"   # https://steamcommunity.com/dev/apikey (обязательно)
 
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
-# Выберите провайдера — переключение одной строкой, промт общий для обоих.
-LLM_PROVIDER = "grok"  # "gemini" | "grok" | "none" (none = только жёсткие правила, без текста)
+LLM_PROVIDER = "deepseek"  # "deepseek" | "none" (none = только жёсткие правила, без текста)
 
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"     # https://aistudio.google.com/apikey (бесплатно)
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-GROK_API_KEY = "xai-rCzP0lopP9zahCuUz8TdlJgjCnwOZvFym1VxHcsJcKvf8wXpXFEhutYsyp5ZUPTGrHvbA2BuyDUN07Ob"          # https://console.x.ai (платно, есть бесплатные кредиты на старте)
-GROK_MODEL = "grok-4.3"                     # актуальный флагман xAI на середину 2026 — проверьте на x.ai/api
-GROK_API_BASE = "https://api.x.ai/v1"       # OpenAI-совместимый эндпоинт
+DEEPSEEK_API_KEY = "sk-749ec2eb7d244b0fbb8cf6f314441528"   # https://platform.deepseek.com/api_keys
+DEEPSEEK_MODEL = "deepseek-chat"             # актуальная модель — проверьте на platform.deepseek.com/docs
+DEEPSEEK_API_BASE = "https://api.deepseek.com"  # OpenAI-совместимый эндпоинт
 
 ENABLE_LLM_REVIEW = True                    # выключите, если не нужен текстовый разбор от LLM
 
@@ -482,10 +477,8 @@ def detect_issues(facts: dict) -> list[str]:
 
 class MatchReviewWriter:
     """Дополняет факты + список проблем связным текстом через LLM.
-    Поддерживает два провайдера (переключаются константой LLM_PROVIDER):
-      - "gemini": Google Gemini REST API (бесплатно, но недоступен в части регионов)
-      - "grok":   xAI Grok, эндпоинт OpenAI-совместимый (api.x.ai/v1/chat/completions),
-                  платный (есть стартовые бесплатные кредиты)
+    Провайдер — DeepSeek, эндпоинт OpenAI-совместимый
+    (api.deepseek.com/chat/completions), дёшево (платно, но по факту копейки).
     Если провайдер "none", ключ не задан, или запрос упал — просто не
     добавляет текстовый блок: embed с фактами и detect_issues() всё равно
     уходит игроку, это никогда не блокирует основную функцию."""
@@ -494,10 +487,8 @@ class MatchReviewWriter:
         self.provider = provider
         self.session: aiohttp.ClientSession | None = None
 
-        if provider == "gemini":
-            self.enabled = ENABLE_LLM_REVIEW and bool(GEMINI_API_KEY) and "YOUR_" not in GEMINI_API_KEY
-        elif provider == "grok":
-            self.enabled = ENABLE_LLM_REVIEW and bool(GROK_API_KEY) and "YOUR_" not in GROK_API_KEY
+        if provider == "deepseek":
+            self.enabled = ENABLE_LLM_REVIEW and bool(DEEPSEEK_API_KEY) and "YOUR_" not in DEEPSEEK_API_KEY
         else:
             self.enabled = False
 
@@ -532,41 +523,17 @@ class MatchReviewWriter:
         if not self.enabled:
             return None
         prompt = self._build_prompt(facts, issues)
-        if self.provider == "gemini":
-            return await self._write_gemini(prompt)
-        if self.provider == "grok":
-            return await self._write_grok(prompt)
+        if self.provider == "deepseek":
+            return await self._write_deepseek(prompt)
         return None
 
-    async def _write_gemini(self, prompt: str) -> str | None:
-        url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        try:
-            s = await self._s()
-            async with s.post(url, params={"key": GEMINI_API_KEY}, json=payload,
-                               timeout=aiohttp.ClientTimeout(total=30)) as r:
-                if r.status != 200:
-                    if DEBUG_LOG:
-                        print(f"[LLM/gemini] статус {r.status}: {await r.text()}")
-                    return None
-                data = await r.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return None
-            parts = candidates[0].get("content", {}).get("parts", [])
-            return "".join(p.get("text", "") for p in parts).strip() or None
-        except Exception as e:
-            if DEBUG_LOG:
-                print(f"[LLM/gemini] ошибка: {e}")
-            return None
-
-    async def _write_grok(self, prompt: str) -> str | None:
+    async def _write_deepseek(self, prompt: str) -> str | None:
         # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
-        # messages вместо contents. Модель и базовый URL — см. константы вверху файла.
-        url = f"{GROK_API_BASE}/chat/completions"
-        headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+        # messages. Модель и базовый URL — см. константы вверху файла.
+        url = f"{DEEPSEEK_API_BASE}/chat/completions"
+        headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": GROK_MODEL,
+            "model": DEEPSEEK_MODEL,
             "messages": [
                 {"role": "system", "content": "Ты — тренер по Dota 2, отвечаешь на русском."},
                 {"role": "user", "content": prompt},
@@ -579,7 +546,7 @@ class MatchReviewWriter:
                                timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status != 200:
                     if DEBUG_LOG:
-                        print(f"[LLM/grok] статус {r.status}: {await r.text()}")
+                        print(f"[LLM/deepseek] статус {r.status}: {await r.text()}")
                     return None
                 data = await r.json()
             choices = data.get("choices", [])
@@ -588,7 +555,7 @@ class MatchReviewWriter:
             return choices[0].get("message", {}).get("content", "").strip() or None
         except Exception as e:
             if DEBUG_LOG:
-                print(f"[LLM/grok] ошибка: {e}")
+                print(f"[LLM/deepseek] ошибка: {e}")
             return None
 
 
