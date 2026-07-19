@@ -8,9 +8,12 @@ Dota статистика v4 — без слэш-команд, всё через
          (gameid == "570"). Никакого конфига от игрока не требуется.
       2) Автообновляемая доска "Кто сейчас играет" — одно сообщение в канале,
          которое бот сам редактирует раз в STATUS_POLL_INTERVAL_SECONDS.
-      3) Детект совместного лобби/пати — если у двух привязанных участников
-         совпадает lobbysteamid из того же GetPlayerSummaries, значит они
-         сейчас в одной группе. Отображается на той же доске.
+      3) Детект совместного лобби/пати — реализовано через party_id из
+         OpenDota в деталях ЗАВЕРШЁННОГО матча (не в реальном времени).
+         Изначальная идея использовать live-поле Steam "lobbysteamid"
+         не сработала на практике — это недокументированное поле, и по
+         реальным логам оно почти никогда не приходит от GetPlayerSummaries.
+         party_id из OpenDota куда надёжнее и виден прямо в разборе матча.
       4) Разбор матча после игры — бот следит за recentMatches каждого
          привязанного игрока (обычная публичная статистика OpenDota, не
          требует ни файла, ни дружбы). Как только матч закончился и попал
@@ -378,10 +381,16 @@ def _closest_percentile_value(benchmark_list: list[dict], target: float = 0.5):
     return closest.get("value")
 
 
-async def build_match_facts(account_id: int, match_id: int) -> dict | None:
+async def build_match_facts(account_id: int, match_id: int,
+                             known_account_ids: dict[int, int] | None = None) -> dict | None:
     """Собирает объективные цифры по матчу конкретного игрока + сравнение
     с медианой по герою (OpenDota benchmarks). Никакого LLM тут нет —
-    только факты."""
+    только факты.
+
+    known_account_ids: {account_id: discord_id} всех привязанных на сервере —
+    нужно, чтобы найти, кто из них был в той же пати (party_id) в этом матче.
+    Это надёжная замена недокументированному Steam-полю lobbysteamid, которое
+    на практике почти никогда не приходит в GetPlayerSummaries."""
     match = await od.match_details(match_id)
     if not match:
         return None
@@ -402,6 +411,15 @@ async def build_match_facts(account_id: int, match_id: int) -> dict | None:
 
     last_hits = player.get("last_hits", 0)
 
+    party_teammates: list[int] = []  # discord_id других привязанных игроков в этой же пати
+    party_id = player.get("party_id")
+    if party_id and known_account_ids:
+        for p in match.get("players", []):
+            other_acc = p.get("account_id")
+            if (other_acc and other_acc != account_id and p.get("party_id") == party_id
+                    and other_acc in known_account_ids):
+                party_teammates.append(known_account_ids[other_acc])
+
     return {
         "match_id": match_id,
         "hero": await od.hero_name(hero_id),
@@ -419,6 +437,7 @@ async def build_match_facts(account_id: int, match_id: int) -> dict | None:
         "lh_per_min_median": lh_per_min_median,
         "hero_damage": player.get("hero_damage", 0),
         "hero_damage_per_min_median": hero_dmg_median,
+        "party_teammates": party_teammates,
         "tower_damage": player.get("tower_damage", 0),
         "hero_healing": player.get("hero_healing", 0),
         "obs_placed": player.get("obs_placed", 0),
@@ -719,6 +738,29 @@ class DashboardView(discord.ui.View):
             color=0x8B4513)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @discord.ui.button(label="Разбор последней игры", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="dota:last_review")
+    async def last_review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        account_id = self.db.get_account_id(interaction.user.id)
+        if not account_id:
+            await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        recent = await od.get(f"/players/{account_id}/recentMatches")
+        if not recent:
+            await interaction.followup.send("Не нашёл матчей у вас в истории OpenDota.", ephemeral=True)
+            return
+
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        embed = await cog.build_match_review(interaction.user.id, account_id, recent[0]["match_id"])
+        if not embed:
+            await interaction.followup.send(
+                "Не получилось собрать разбор — матч мог быть без полной статистики "
+                "(например, ещё не распарсился в OpenDota). Попробуйте чуть позже.",
+                ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 # ---------------- cog ----------------
 
@@ -750,24 +792,22 @@ class DotaStats(commands.Cog):
         summaries: list[dict] = []
         for i in range(0, len(steam_ids), 100):  # Steam API — максимум 100 id за запрос
             summaries += await steam_client.get_player_summaries(steam_ids[i:i + 100])
-        if DEBUG_LOG and summaries:
-            print(f"[STEAM] пример сводки: {summaries[0]}")
+        if DEBUG_LOG:
+            in_dota = sum(1 for s in summaries if s.get("gameid") == "570")
+            print(f"[STEAM] опрошено {len(summaries)} игроков, в Dota 2 сейчас: {in_dota}")
 
         summary_by_steamid = {int(s["steamid"]): s for s in summaries if "steamid" in s}
 
-        playing_ids: list[int] = []
-        lobby_groups: dict[str, list[int]] = {}
-        for discord_id, account_id, steam_id64 in players:
-            s = summary_by_steamid.get(steam_id64)
-            if not s or s.get("gameid") != "570":
-                continue
-            playing_ids.append(discord_id)
-            lobby_id = s.get("lobbysteamid")
-            if lobby_id and lobby_id != "0":
-                lobby_groups.setdefault(lobby_id, []).append(discord_id)
+        # Раньше тут же детектилась совместная пати по lobbysteamid, но это
+        # недокументированное поле Steam на практике почти никогда не приходит
+        # (см. реальные логи) — детект пати перенесён в разбор матча после
+        # игры, где используется надёжный party_id из OpenDota.
+        playing_ids = [
+            discord_id for discord_id, account_id, steam_id64 in players
+            if (s := summary_by_steamid.get(steam_id64)) and s.get("gameid") == "570"
+        ]
 
         self._playing_ids = playing_ids
-        self._party_groups = [ids for ids in lobby_groups.values() if len(ids) > 1]
         await self._refresh_status_boards()
 
     @poll_status.before_loop
@@ -787,21 +827,12 @@ class DotaStats(commands.Cog):
             playing_members = [m for m in playing_members if m]
             playing_lines = [f"🟢 {m.mention}" for m in playing_members] or ["Сейчас никто не играет"]
 
-            party_lines = []
-            for group in getattr(self, "_party_groups", []):
-                members = [guild.get_member(did) for did in group]
-                members = [m for m in members if m]
-                if len(members) > 1:
-                    names = ", ".join(m.mention for m in members)
-                    party_lines.append(f"🎉 Играют вместе: {names}")
-
             embed = discord.Embed(title="🎮 Кто сейчас играет", color=0x8B4513,
                                    timestamp=datetime.now(timezone.utc))
             embed.add_field(name=f"В игре ({len(playing_members)})",
                              value="\n".join(playing_lines), inline=False)
-            if party_lines:
-                embed.add_field(name="Совместные пати", value="\n".join(party_lines), inline=False)
-            embed.set_footer(text=f"Обновляется автоматически каждые ~{STATUS_POLL_INTERVAL_SECONDS} сек")
+            embed.set_footer(text=f"Обновляется автоматически каждые ~{STATUS_POLL_INTERVAL_SECONDS} сек. "
+                                   f"Кто с кем в пати — смотрите в разборе матча после игры")
 
             try:
                 msg = await channel.fetch_message(message_id)
@@ -838,17 +869,11 @@ class DotaStats(commands.Cog):
     async def before_poll_matches(self):
         await self.bot.wait_until_ready()
 
-    async def _send_match_review(self, discord_id: int, account_id: int, match_id: int):
-        facts = await build_match_facts(account_id, match_id)
-        if not facts:
-            return
-        issues = detect_issues(facts)
-        review_text = await match_reviewer.write_review(facts, issues)
-
+    def _build_review_embed(self, facts: dict, issues: list[str], review_text: str | None) -> discord.Embed:
         result_word = "🟢 Победа" if facts["won"] else "🔴 Поражение"
         embed = discord.Embed(
             title=f"Разбор матча — {facts['hero']} ({result_word})",
-            url=f"https://www.dotabuff.com/matches/{match_id}",
+            url=f"https://www.dotabuff.com/matches/{facts['match_id']}",
             color=0x2ecc71 if facts["won"] else 0xe74c3c,
         )
         embed.add_field(name="KDA", value=f"{facts['kills']}/{facts['deaths']}/{facts['assists']}")
@@ -859,8 +884,28 @@ class DotaStats(commands.Cog):
         embed.add_field(name="Добивания", value=f"{facts['last_hits']} ({facts['lh_per_min']}/мин)")
         embed.add_field(name="Урон герою / башням", value=f"{facts['hero_damage']} / {facts['tower_damage']}")
         embed.add_field(name="⚠️ Возможные проблемы", value="\n".join(issues), inline=False)
+        if facts["party_teammates"]:
+            mentions = ", ".join(f"<@{did}>" for did in facts["party_teammates"])
+            embed.add_field(name="🎉 Играли вместе (пати)", value=mentions, inline=False)
         if review_text:
             embed.add_field(name="🧠 Разбор от тренера (LLM)", value=review_text[:1000], inline=False)
+        return embed
+
+    async def build_match_review(self, discord_id: int, account_id: int, match_id: int) -> discord.Embed | None:
+        """Считает факты + issues + LLM-текст и собирает embed. Переиспользуется
+        и автопостом (poll_new_matches), и кнопкой "разбор последней игры"."""
+        known_account_ids = {acc: did for did, acc, _ in self.db.all_players()}
+        facts = await build_match_facts(account_id, match_id, known_account_ids)
+        if not facts:
+            return None
+        issues = detect_issues(facts)
+        review_text = await match_reviewer.write_review(facts, issues)
+        return self._build_review_embed(facts, issues, review_text)
+
+    async def _send_match_review(self, discord_id: int, account_id: int, match_id: int):
+        embed = await self.build_match_review(discord_id, account_id, match_id)
+        if not embed:
+            return
 
         user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
         try:
