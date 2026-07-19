@@ -1,70 +1,68 @@
 """
-Dota статистика v3 — без слэш-команд, всё через кнопки + модалки.
-Live-контры работают для ЛЮБОГО ранга через официальный Steam Web API
-(без конфига на компьютере игрока, без ручного выбора героев).
+Dota статистика v4 — без слэш-команд, всё через кнопки + модалки.
 
-НОВОЕ в этой версии:
-  - Кнопка "Мой live-матч" теперь в ОДНОМ ответе показывает:
-      1) винрейт вашего героя против каждого вражеского (OpenDota, тысячи матчей)
-      2) рекомендованные предметы под вашего героя по фазам игры (OpenDota)
-      3) короткую текстовую стратегию, которую генерирует LLM (Claude, Anthropic API)
-         СТРОГО на основе пунктов 1 и 2 — модель не выдумывает статистику,
-         а интерпретирует уже реальные цифры из OpenDota.
-  - Результат LLM кэшируется на LLM_STRATEGY_CACHE_TTL_SECONDS для одной и той же
-    комбинации (мой герой + вражеские герои), чтобы не тратить лишние токены/деньги
-    при повторных нажатиях кнопки разными игроками в одном матче.
+ЧТО ИЗМЕНИЛОСЬ ПО СРАВНЕНИЮ С ПРЕДЫДУЩЕЙ ВЕРСИЕЙ:
+  - Убран live-матч (Steam GetRealtimeStats, контры по вражескому драфту).
+  - Добавлено:
+      1) Статус "в игре / не в игре" — бесплатно, через Steam GetPlayerSummaries
+         (gameid == "570"). Никакого конфига от игрока не требуется.
+      2) Автообновляемая доска "Кто сейчас играет" — одно сообщение в канале,
+         которое бот сам редактирует раз в STATUS_POLL_INTERVAL_SECONDS.
+      3) Детект совместного лобби/пати — если у двух привязанных участников
+         совпадает lobbysteamid из того же GetPlayerSummaries, значит они
+         сейчас в одной группе. Отображается на той же доске.
+      4) Разбор матча после игры — бот следит за recentMatches каждого
+         привязанного игрока (обычная публичная статистика OpenDota, не
+         требует ни файла, ни дружбы). Как только матч закончился и попал
+         в базу — считает факты (KDA, GPM/XPM/CS против медианы по герою,
+         урон, вардение), ВСЕГДА показывает список конкретных проблем по
+         жёстким правилам (работает без всякого LLM), и ДОПОЛНИТЕЛЬНО, если
+         настроен LLM-ключ, добавляет связный текстовый разбор поверх тех же
+         фактов. Результат шлётся в личку игроку (с fallback в общий канал,
+         если ЛС закрыты).
+      5) Еженедельный лидерборд — раз в неделю (по понедельникам) в канал
+         с панелью автоматически постится топ участников по количеству игр
+         и винрейту за последние 7 дней. Плюс есть кнопка для лидерборда
+         "по запросу" в любой момент.
 
-Один раз ставите панель командой !dota_setup в нужном канале —
-дальше игроки жмут кнопки, всё индивидуально (ephemeral-ответы,
-видны только нажавшему).
+Кнопки на панели:
+  🔗 Привязать SteamID     -> модалка с вводом SteamID
+  📊 Мой профиль            -> винрейт/ранг/последний матч (ephemeral)
+  🔥 Топ мета героев        -> топ-10 по пикрейту
+  🛒 Предметы под героя     -> модалка "введи имя героя" -> билд по фазам игры
+  🛒 Топ предметы (тренд)   -> агрегированный тренд по топ-героям (кэш 1 час)
+  🏆 Лидерборд недели       -> топ сервера за последние 7 дней "по запросу"
+
+Отдельные команды администратора (не слэш, обычные текстовые, разово):
+  !dota_setup           -> ставит панель с кнопками в текущем канале
+  !dota_status_board    -> ставит автообновляемую доску "кто сейчас играет"
 
 ------------------------------------------------------------------
-КАК РАБОТАЕТ АВТООПРЕДЕЛЕНИЕ LIVE-МАТЧА (без конфига, для любого MMR):
+РАЗБОР МАТЧА — ЧТО ИМЕННО СЧИТАЕТСЯ И ОТКУДА:
 
-  1. Раз в STEAM_POLL_INTERVAL_SECONDS бот пачкой спрашивает Steam Web API
-     (ISteamUser/GetPlayerSummaries) про всех привязанных игроков:
-     "запущена ли Dota 2 и есть ли gameserversteamid" (это официальный,
-     публичный признак "игрок сейчас на игровом сервере").
-  2. Если сервер найден — бот запрашивает IDOTA2MatchStats_570/GetRealtimeStats
-     по этому server_steam_id. Это ДРУГОЙ метод, чем OpenDota /live — он
-     отдаёт данные по КОНКРЕТНОМУ серверу, а не только по топовым
-     транслируемым матчам, поэтому работает независимо от MMR.
-  3. Из ответа достаются герои обеих команд, бот считает винрейты
-     матчапов вашего героя против каждого вражеского через OpenDota.
-
-  Ограничения, о которых стоит знать:
-  - Нужен собственный бесплатный ключ Steam Web API:
-    https://steamcommunity.com/dev/apikey
-  - Обновление раз в ~45 секунд, а не мгновенно (не push, а поллинг).
-  - Сработает только если приватность профиля Steam у игрока не скрывает
-    статус "сейчас в игре" (по умолчанию у большинства открыто).
-  - Точные названия полей в ответе GetRealtimeStats могут отличаться —
-    включите STEAM_DEBUG_LOG=True и посмотрите реальный payload в консоли
-    перед боевым использованием, если контры не будут находиться.
-------------------------------------------------------------------
-LLM-СТРАТЕГИЯ — ЧТО ЭТО И ЧЕГО ЭТО НЕ ДЕЛАЕТ:
-
-  - Модель НЕ ищет данные в интернете, не читает Dotabuff/D2PT и т.п.
-  - Ей на вход подаётся ТОЛЬКО то, что бот уже сам посчитал из OpenDota:
-    список вражеских героев с вашим винрейтом против них (тысячи матчей
-    в базе OpenDota) и топ предметов под вашего героя по фазам игры.
-  - Задача модели — просто связно и коротко пересказать эти цифры в виде
-    тактических советов, а не придумать новую статистику.
-  - Используется бесплатный Google Gemini API (REST, через уже подключённый
-    aiohttp — отдельный SDK не нужен). Если GEMINI_API_KEY не задан или
-    запрос упал — бот просто покажет embed без секции стратегии, ничего
-    не сломается.
+  - Данные по конкретному матчу: OpenDota /matches/{id} — KDA, GPM, XPM,
+    last hits, урон герою/башням, лечение, вардение.
+  - "Медиана по герою" для сравнения: OpenDota /benchmarks?hero_id=X —
+    официальная агрегированная статистика по игрокам на этом герое.
+  - Список ошибок (⚠️ Возможные проблемы) строится ЖЁСТКИМИ правилами
+    в detect_issues() — это работает ВСЕГДА, даже без LLM-ключа.
+  - Текстовый разбор от LLM (если настроен GEMINI_API_KEY) получает на
+    вход ТОЛЬКО эти же посчитанные факты и просто связно их пересказывает —
+    модель не ищет ничего в интернете и не должна придумывать цифры сверх
+    переданных.
 ------------------------------------------------------------------
 
 Установка:
   pip install aiohttp discord.py
-  Впишите STEAM_API_KEY и GEMINI_API_KEY ниже.
+  Впишите STEAM_API_KEY (обязательно для статуса/доски/пати) и
+  GEMINI_API_KEY (опционально, для текстового разбора матчей) ниже.
   await bot.load_extension("dota_stats_v3")
 """
 
 import asyncio
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -77,15 +75,25 @@ STEAM64_OFFSET = 76561197960265728
 DB_PATH = Path(__file__).parent / "dota_stats.db"
 
 # --- настройте под себя ---
-STEAM_API_KEY ="C5BD806939B9711D9722489FB77DF417"        # https://steamcommunity.com/dev/apikey
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"          # https://aistudio.google.com/apikey (бесплатно)
+STEAM_API_KEY = "C5BD806939B9711D9722489FB77DF417"   # https://steamcommunity.com/dev/apikey (обязательно)
+
+# Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
+# Выберите провайдера — переключение одной строкой, промт общий для обоих.
+LLM_PROVIDER = "grok"  # "gemini" | "grok" | "none" (none = только жёсткие правила, без текста)
+
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"     # https://aistudio.google.com/apikey (бесплатно)
 GEMINI_MODEL = "gemini-2.0-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-ENABLE_LLM_STRATEGY = True                       # выключите, если не нужна текстовая стратегия
-STEAM_POLL_INTERVAL_SECONDS = 45
-STEAM_DEBUG_LOG = True  # печатать сырые ответы Steam API в консоль для сверки схемы
-LIVE_STATE_TTL_SECONDS = 300  # сколько считаем данные о матче ещё актуальными
-LLM_STRATEGY_CACHE_TTL_SECONDS = 1800  # чтобы не пересчитывать стратегию на каждое нажатие
+
+GROK_API_KEY = "xai-rCzP0lopP9zahCuUz8TdlJgjCnwOZvFym1VxHcsJcKvf8wXpXFEhutYsyp5ZUPTGrHvbA2BuyDUN07Ob"          # https://console.x.ai (платно, есть бесплатные кредиты на старте)
+GROK_MODEL = "grok-4.3"                     # актуальный флагман xAI на середину 2026 — проверьте на x.ai/api
+GROK_API_BASE = "https://api.x.ai/v1"       # OpenAI-совместимый эндпоинт
+
+ENABLE_LLM_REVIEW = True                    # выключите, если не нужен текстовый разбор от LLM
+
+STATUS_POLL_INTERVAL_SECONDS = 40           # как часто обновлять доску "кто играет"
+MATCH_POLL_INTERVAL_MINUTES = 5             # как часто проверять новые завершённые матчи
+DEBUG_LOG = True                             # печатать сырые ответы API в консоль для отладки
 
 
 def to_account_id(steam_id) -> int:
@@ -107,12 +115,29 @@ class Storage:
         c.execute("""CREATE TABLE IF NOT EXISTS players (
             discord_id INTEGER PRIMARY KEY,
             account_id INTEGER NOT NULL,
-            steam_id64 INTEGER NOT NULL
+            steam_id64 INTEGER NOT NULL,
+            last_match_id INTEGER DEFAULT 0
         )""")
+        # миграция для БД, созданных предыдущей версией (без last_match_id)
+        try:
+            c.execute("ALTER TABLE players ADD COLUMN last_match_id INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # колонка уже есть
+
         c.execute("""CREATE TABLE IF NOT EXISTS dashboard (
             guild_id INTEGER PRIMARY KEY,
             channel_id INTEGER,
             message_id INTEGER
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS status_board (
+            guild_id INTEGER PRIMARY KEY,
+            channel_id INTEGER,
+            message_id INTEGER
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS leaderboard_posts (
+            guild_id INTEGER,
+            week_key TEXT,
+            PRIMARY KEY (guild_id, week_key)
         )""")
         c.commit()
 
@@ -130,9 +155,20 @@ class Storage:
         return row[0] if row else None
 
     def all_players(self):
-        """-> [(discord_id, account_id, steam_id64), ...]"""
+        """-> [(discord_id, account_id, steam_id64), ...]
+        Сохранено для обратной совместимости с server_management.py."""
         return self.conn.execute(
             "SELECT discord_id, account_id, steam_id64 FROM players").fetchall()
+
+    def all_players_full(self):
+        """-> [(discord_id, account_id, steam_id64, last_match_id), ...]"""
+        return self.conn.execute(
+            "SELECT discord_id, account_id, steam_id64, last_match_id FROM players").fetchall()
+
+    def update_last_match(self, discord_id: int, match_id: int):
+        self.conn.execute(
+            "UPDATE players SET last_match_id=? WHERE discord_id=?", (match_id, discord_id))
+        self.conn.commit()
 
     def set_dashboard(self, guild_id: int, channel_id: int, message_id: int):
         self.conn.execute(
@@ -144,8 +180,30 @@ class Storage:
     def all_dashboards(self):
         return self.conn.execute("SELECT guild_id, channel_id, message_id FROM dashboard").fetchall()
 
+    def set_status_board(self, guild_id: int, channel_id: int, message_id: int):
+        self.conn.execute(
+            "INSERT INTO status_board (guild_id, channel_id, message_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id, message_id=excluded.message_id",
+            (guild_id, channel_id, message_id))
+        self.conn.commit()
 
-# ---------------- OpenDota client (профиль, мета, предметы, матчапы) ----------------
+    def all_status_boards(self):
+        return self.conn.execute("SELECT guild_id, channel_id, message_id FROM status_board").fetchall()
+
+    def leaderboard_posted(self, guild_id: int, week_key: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM leaderboard_posts WHERE guild_id=? AND week_key=?",
+            (guild_id, week_key)).fetchone()
+        return row is not None
+
+    def mark_leaderboard_posted(self, guild_id: int, week_key: str):
+        self.conn.execute(
+            "INSERT OR IGNORE INTO leaderboard_posts (guild_id, week_key) VALUES (?, ?)",
+            (guild_id, week_key))
+        self.conn.commit()
+
+
+# ---------------- OpenDota client (профиль, мета, предметы, разбор матчей) ----------------
 
 class OpenDota:
     def __init__(self):
@@ -154,6 +212,7 @@ class OpenDota:
         self.hero_name_to_id: dict[str, int] = {}
         self.items_cache: dict[int, str] = {}
         self.item_trend_cache: tuple[float, list] = (0.0, [])
+        self.benchmarks_cache: dict[int, tuple[float, dict]] = {}
 
     async def _s(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -200,9 +259,6 @@ class OpenDota:
         await self.ensure_items()
         return self.items_cache.get(item_id, f"item_{item_id}")
 
-    async def matchups(self, hero_id: int):
-        return await self.get(f"/heroes/{hero_id}/matchups") or []
-
     async def item_popularity(self, hero_id: int):
         return await self.get(f"/heroes/{hero_id}/itemPopularity")
 
@@ -245,9 +301,6 @@ class OpenDota:
     }
 
     async def item_recommendations(self, hero_id: int, per_phase: int = 5) -> dict[str, list[str]]:
-        """-> {"Старт": ["Tango (1234)", ...], "Ранняя игра": [...], ...}
-        Те же данные, что и в кнопке 'Предметы под героя', вынесены в
-        переиспользуемую функцию, чтобы не дублировать логику."""
         pop = await self.item_popularity(hero_id)
         result: dict[str, list[str]] = {}
         if not pop:
@@ -260,13 +313,37 @@ class OpenDota:
             result[title] = [f"{await self.item_name(int(iid))} ({cnt})" for iid, cnt in top]
         return result
 
+    async def match_details(self, match_id: int):
+        return await self.get(f"/matches/{match_id}")
+
+    async def hero_benchmarks(self, hero_id: int) -> dict:
+        """Медианные (и другие) значения GPM/XPM/CS и т.д. по игрокам на
+        этом герое — официальная агрегированная статистика OpenDota.
+        Кэш на час, чтобы не долбить API при каждом разборе матча."""
+        cached_at, data = self.benchmarks_cache.get(hero_id, (0.0, None))
+        if data and time.time() - cached_at < 3600:
+            return data
+        data = await self.get(f"/benchmarks?hero_id={hero_id}") or {}
+        self.benchmarks_cache[hero_id] = (time.time(), data)
+        return data
+
+    async def player_matches_since(self, account_id: int, days: int = 7, limit: int = 100):
+        return await self.get(f"/players/{account_id}/matches?date={days}&limit={limit}") or []
+
 
 od = OpenDota()
 
 
-# ---------------- Steam Web API client (детект live-матча, любой MMR) ----------------
+# ---------------- Steam Web API client (статус "в игре", детект пати) ----------------
 
 class SteamAPI:
+    """Только GetPlayerSummaries — публичный, официальный, бесплатный метод.
+    Показывает: запущена ли игра (gameid == '570' для Dota 2) и
+    lobbysteamid (если игрок сейчас в лобби/пати — совпадающий id у
+    нескольких привязанных участников значит они играют вместе).
+    НЕ даёт составы команд/героев — для этого раньше использовался
+    GetRealtimeStats, который убрали по вашей просьбе."""
+
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session: aiohttp.ClientSession | None = None
@@ -288,34 +365,122 @@ class SteamAPI:
             data = await r.json()
             return data.get("response", {}).get("players", [])
 
-    async def get_realtime_stats(self, server_steam_id: str):
-        s = await self._s()
-        url = f"{STEAM_API_BASE}/IDOTA2MatchStats_570/GetRealtimeStats/v1/"
-        params = {"server_steam_id": server_steam_id}
-        async with s.get(url, params=params) as r:
-            if r.status != 200:
-                return None
-            return await r.json()
-
 
 steam_client = SteamAPI(STEAM_API_KEY)
 
 
-# ---------------- LLM-стратегия (Anthropic API) поверх реальных данных OpenDota ----------------
+# ---------------- разбор матча: факты + жёсткие правила + LLM поверх них ----------------
 
-class StrategyWriter:
-    """Генерирует короткий текстовый разбор ТОЛЬКО на основе уже посчитанных
-    ботом цифр (матчапы + предметы). Модель ничего не ищет и не выдумывает —
-    она получает готовые факты и просто формулирует их связно.
-    Использует бесплатный Google Gemini API (REST, через aiohttp — без
-    дополнительного SDK)."""
+def _closest_percentile_value(benchmark_list: list[dict], target: float = 0.5):
+    if not benchmark_list:
+        return None
+    closest = min(benchmark_list, key=lambda x: abs(x.get("percentile", 0) - target))
+    return closest.get("value")
 
-    def __init__(self, api_key: str, model: str):
-        self.enabled = ENABLE_LLM_STRATEGY and bool(api_key) and "YOUR_" not in api_key
-        self.model = model
-        self.api_key = api_key
+
+async def build_match_facts(account_id: int, match_id: int) -> dict | None:
+    """Собирает объективные цифры по матчу конкретного игрока + сравнение
+    с медианой по герою (OpenDota benchmarks). Никакого LLM тут нет —
+    только факты."""
+    match = await od.match_details(match_id)
+    if not match:
+        return None
+    player = next((p for p in match.get("players", []) if p.get("account_id") == account_id), None)
+    if not player:
+        return None
+
+    hero_id = player.get("hero_id")
+    won = (player.get("player_slot", 0) < 128) == match.get("radiant_win")
+    duration_min = max(match.get("duration", 60) / 60, 1)
+
+    bench = await od.hero_benchmarks(hero_id)
+    result = bench.get("result", {}) if bench else {}
+    gpm_median = _closest_percentile_value(result.get("gold_per_min", []))
+    xpm_median = _closest_percentile_value(result.get("xp_per_min", []))
+    lh_per_min_median = _closest_percentile_value(result.get("last_hits_per_min", []))
+    hero_dmg_median = _closest_percentile_value(result.get("hero_damage_per_min", []))
+
+    last_hits = player.get("last_hits", 0)
+
+    return {
+        "match_id": match_id,
+        "hero": await od.hero_name(hero_id),
+        "won": won,
+        "kills": player.get("kills", 0),
+        "deaths": player.get("deaths", 0),
+        "assists": player.get("assists", 0),
+        "duration_min": round(duration_min, 1),
+        "gpm": player.get("gold_per_min", 0),
+        "gpm_median": gpm_median,
+        "xpm": player.get("xp_per_min", 0),
+        "xpm_median": xpm_median,
+        "last_hits": last_hits,
+        "lh_per_min": round(last_hits / duration_min, 1),
+        "lh_per_min_median": lh_per_min_median,
+        "hero_damage": player.get("hero_damage", 0),
+        "hero_damage_per_min_median": hero_dmg_median,
+        "tower_damage": player.get("tower_damage", 0),
+        "hero_healing": player.get("hero_healing", 0),
+        "obs_placed": player.get("obs_placed", 0),
+        "sen_placed": player.get("sen_placed", 0),
+    }
+
+
+def detect_issues(facts: dict) -> list[str]:
+    """Жёсткие правила, без LLM — работают всегда, даже без API-ключа.
+    Каждая строка — конкретная, объективно проверяемая проблема."""
+    issues = []
+
+    if facts["deaths"] >= 8:
+        issues.append(f"❗ Много смертей ({facts['deaths']}) — это стабильные потери золота "
+                       f"и времени на респавн, стоит осторожнее играть на карте.")
+
+    if facts["gpm_median"] and facts["gpm"] < facts["gpm_median"] * 0.75:
+        issues.append(f"💰 GPM {facts['gpm']} заметно ниже медианы для этого героя "
+                       f"({facts['gpm_median']:.0f}) — не хватало фарма/эффективности линии.")
+
+    if facts["lh_per_min_median"] and facts["lh_per_min"] < facts["lh_per_min_median"] * 0.75:
+        issues.append(f"🌾 Добиваний в минуту ({facts['lh_per_min']}) меньше медианы "
+                       f"({facts['lh_per_min_median']:.1f}) — терялся крип-фарм.")
+
+    if facts["obs_placed"] == 0 and facts["sen_placed"] == 0 and facts["duration_min"] > 15:
+        issues.append("👁 За весь матч не поставлено ни одного варда — обзор карты страдал "
+                       "весь матч, это касается всех, не только саппортов.")
+
+    if not facts["won"] and (facts["kills"] + facts["assists"]) < facts["deaths"]:
+        issues.append("⚔️ Участие в килах ниже количества смертей — низкий полезный "
+                       "вклад в командные стычки в проигранной игре.")
+
+    if facts["xpm_median"] and facts["xpm"] < facts["xpm_median"] * 0.75:
+        issues.append(f"📈 XPM {facts['xpm']} ниже медианы ({facts['xpm_median']:.0f}) — "
+                       f"герой развивался медленнее обычного для этой роли.")
+
+    if not issues:
+        issues.append("✅ По ключевым метрикам матч в пределах нормы для этого героя, "
+                       "явных проблем не обнаружено.")
+    return issues
+
+
+class MatchReviewWriter:
+    """Дополняет факты + список проблем связным текстом через LLM.
+    Поддерживает два провайдера (переключаются константой LLM_PROVIDER):
+      - "gemini": Google Gemini REST API (бесплатно, но недоступен в части регионов)
+      - "grok":   xAI Grok, эндпоинт OpenAI-совместимый (api.x.ai/v1/chat/completions),
+                  платный (есть стартовые бесплатные кредиты)
+    Если провайдер "none", ключ не задан, или запрос упал — просто не
+    добавляет текстовый блок: embed с фактами и detect_issues() всё равно
+    уходит игроку, это никогда не блокирует основную функцию."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
         self.session: aiohttp.ClientSession | None = None
-        self.cache: dict[tuple, tuple[float, str]] = {}
+
+        if provider == "gemini":
+            self.enabled = ENABLE_LLM_REVIEW and bool(GEMINI_API_KEY) and "YOUR_" not in GEMINI_API_KEY
+        elif provider == "grok":
+            self.enabled = ENABLE_LLM_REVIEW and bool(GROK_API_KEY) and "YOUR_" not in GROK_API_KEY
+        else:
+            self.enabled = False
 
     async def _s(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -323,68 +488,92 @@ class StrategyWriter:
         return self.session
 
     @staticmethod
-    def _cache_key(my_hero_id: int, enemy_hero_ids: list[int]) -> tuple:
-        return (my_hero_id, tuple(sorted(enemy_hero_ids)))
-
-    async def write(self, my_hero_name: str, matchup_rows: list[tuple[str, float, int]],
-                     item_recs: dict[str, list[str]], my_hero_id: int, enemy_hero_ids: list[int]) -> str | None:
-        if not self.enabled:
-            return None
-
-        key = self._cache_key(my_hero_id, enemy_hero_ids)
-        cached = self.cache.get(key)
-        if cached and time.time() - cached[0] < LLM_STRATEGY_CACHE_TTL_SECONDS:
-            return cached[1]
-
-        matchup_lines = "\n".join(
-            f"- против {name}: винрейт {wr:.1f}% (выборка {games} матчей, база OpenDota)"
-            for name, wr, games in matchup_rows
-        ) or "нет данных по матчапам"
-
-        item_lines = "\n".join(
-            f"{phase}: {', '.join(items)}" for phase, items in item_recs.items()
-        ) or "нет данных по предметам"
-
-        prompt = (
-            f"Ты — помощник по Dota 2. Вот реальные статистические данные из OpenDota "
-            f"(агрегированы по тысячам матчей), НЕ придумывай ничего сверх них.\n\n"
-            f"Мой герой: {my_hero_name}\n\n"
-            f"Винрейт против героев противника (по всей базе OpenDota):\n{matchup_lines}\n\n"
-            f"Популярные предметы под {my_hero_name} по фазам игры (по базе OpenDota):\n{item_lines}\n\n"
-            f"Напиши на русском 4-6 коротких предложений тактического совета: "
-            f"на каких вражеских героев обратить особое внимание (с самым низким винрейтом), "
-            f"и как это связать с порядком сборки предметов. Никаких вымышленных фактов, "
-            f"только интерпретация приведённых цифр."
+    def _build_prompt(facts: dict, issues: list[str]) -> str:
+        result_word = "Победа" if facts["won"] else "Поражение"
+        return (
+            "Ты — тренер по Dota 2. Ниже РЕАЛЬНЫЕ факты одного конкретного матча игрока "
+            "(посчитаны программой из OpenDota, не придумывай цифры сверх них) и уже "
+            "найденные автоматически проблемы. Твоя задача — написать связный, подробный "
+            "разбор на русском (8-12 предложений): что получилось, в чём конкретно ошибки "
+            "(опираясь на переданный список), и 2-3 практических совета на будущее. "
+            "Пиши прямо и по делу, как тренер, а не как отчёт.\n\n"
+            f"Герой: {facts['hero']}, результат: {result_word}, "
+            f"KDA {facts['kills']}/{facts['deaths']}/{facts['assists']}, "
+            f"длительность {facts['duration_min']} мин.\n"
+            f"GPM: {facts['gpm']} (медиана по герою {facts['gpm_median']})\n"
+            f"XPM: {facts['xpm']} (медиана {facts['xpm_median']})\n"
+            f"Добивания/мин: {facts['lh_per_min']} (медиана {facts['lh_per_min_median']})\n"
+            f"Урон герою: {facts['hero_damage']}, урон башням: {facts['tower_damage']}, "
+            f"лечение: {facts['hero_healing']}\n"
+            f"Вардов поставлено: {facts['obs_placed']} obs / {facts['sen_placed']} sentry\n\n"
+            "Уже найденные автоматически проблемы:\n" + "\n".join(issues)
         )
 
-        url = f"{GEMINI_API_BASE}/models/{self.model}:generateContent"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    async def write_review(self, facts: dict, issues: list[str]) -> str | None:
+        if not self.enabled:
+            return None
+        prompt = self._build_prompt(facts, issues)
+        if self.provider == "gemini":
+            return await self._write_gemini(prompt)
+        if self.provider == "grok":
+            return await self._write_grok(prompt)
+        return None
 
+    async def _write_gemini(self, prompt: str) -> str | None:
+        url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
         try:
             s = await self._s()
-            async with s.post(url, params={"key": self.api_key}, json=payload,
+            async with s.post(url, params={"key": GEMINI_API_KEY}, json=payload,
                                timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status != 200:
-                    if STEAM_DEBUG_LOG:
-                        print(f"[LLM] Gemini вернул статус {r.status}: {await r.text()}")
+                    if DEBUG_LOG:
+                        print(f"[LLM/gemini] статус {r.status}: {await r.text()}")
                     return None
                 data = await r.json()
             candidates = data.get("candidates", [])
             if not candidates:
                 return None
             parts = candidates[0].get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts).strip()
+            return "".join(p.get("text", "") for p in parts).strip() or None
         except Exception as e:
-            if STEAM_DEBUG_LOG:
-                print(f"[LLM] ошибка генерации стратегии: {e}")
+            if DEBUG_LOG:
+                print(f"[LLM/gemini] ошибка: {e}")
             return None
 
-        if text:
-            self.cache[key] = (time.time(), text)
-        return text or None
+    async def _write_grok(self, prompt: str) -> str | None:
+        # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
+        # messages вместо contents. Модель и базовый URL — см. константы вверху файла.
+        url = f"{GROK_API_BASE}/chat/completions"
+        headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": GROK_MODEL,
+            "messages": [
+                {"role": "system", "content": "Ты — тренер по Dota 2, отвечаешь на русском."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7,
+        }
+        try:
+            s = await self._s()
+            async with s.post(url, headers=headers, json=payload,
+                               timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    if DEBUG_LOG:
+                        print(f"[LLM/grok] статус {r.status}: {await r.text()}")
+                    return None
+                data = await r.json()
+            choices = data.get("choices", [])
+            if not choices:
+                return None
+            return choices[0].get("message", {}).get("content", "").strip() or None
+        except Exception as e:
+            if DEBUG_LOG:
+                print(f"[LLM/grok] ошибка: {e}")
+            return None
 
 
-strategy_writer = StrategyWriter(GEMINI_API_KEY, GEMINI_MODEL)
+match_reviewer = MatchReviewWriter(LLM_PROVIDER)
 
 
 # ---------------- Modals ----------------
@@ -414,9 +603,8 @@ class RegisterModal(discord.ui.Modal, title="Привязать SteamID"):
         self.db.register(interaction.user.id, account_id, steam_id64)
         name = profile["profile"].get("personaname", "игрок")
         await interaction.response.send_message(
-            f"Привязал вас к **{name}**. Live-контры заработают автоматически, "
-            f"как только начнётся матч (обновление раз в ~{STEAM_POLL_INTERVAL_SECONDS} сек).",
-            ephemeral=True)
+            f"Привязал вас к **{name}**. Разбор матчей и статус \"в игре\" заработают "
+            f"автоматически.", ephemeral=True)
 
 
 class HeroPickModal(discord.ui.Modal, title="Предметы под героя"):
@@ -427,12 +615,22 @@ class HeroPickModal(discord.ui.Modal, title="Предметы под героя"
         if not hero_id:
             await interaction.response.send_message("Герой не найден.", ephemeral=True)
             return
-        recs = await od.item_recommendations(hero_id)
-        if not recs:
+        pop = await od.item_popularity(hero_id)
+        if not pop:
             await interaction.response.send_message("Нет данных по предметам.", ephemeral=True)
             return
+
+        phase_titles = {
+            "start_game_items": "Старт", "early_game_items": "Ранняя игра",
+            "mid_game_items": "Мид-гейм", "late_game_items": "Late-гейм",
+        }
         embed = discord.Embed(title=f"Предметы — {await od.hero_name(hero_id)}", color=0x8B4513)
-        for title, lines in recs.items():
+        for key, title in phase_titles.items():
+            phase = pop.get(key, {})
+            top = sorted(phase.items(), key=lambda x: x[1], reverse=True)[:5]
+            if not top:
+                continue
+            lines = [f"{await od.item_name(int(iid))} ({cnt})" for iid, cnt in top]
             embed.add_field(name=title, value="\n".join(lines), inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -508,73 +706,17 @@ class DashboardView(discord.ui.View):
         embed.set_footer(text="Оценка на основе популярных сборок, не точный глобальный винрейт")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Мой live-матч", emoji="⚔️", style=discord.ButtonStyle.danger, custom_id="dota:live")
-    async def live_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
-        state = cog.live_state.get(interaction.user.id) if cog else None
-        if not state or (time.time() - state["updated_at"] > LIVE_STATE_TTL_SECONDS):
-            await interaction.response.send_message(
-                "Не вижу вас в текущем матче. Проверьте:\n"
-                "— вы привязали SteamID\n"
-                "— профиль Steam не скрывает статус \"сейчас в игре\"\n"
-                "— с начала матча прошло больше минуты (данные обновляются раз в "
-                f"~{STEAM_POLL_INTERVAL_SECONDS} сек)",
-                ephemeral=True)
-            return
-
+    @discord.ui.button(label="Лидерборд недели", emoji="🏆", style=discord.ButtonStyle.success, custom_id="dota:leaderboard")
+    async def leaderboard_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-
-        my_hero_id = state["my_hero_id"]
-        enemy_hero_ids = state["enemy_hero_ids"]
-
-        # 1) матчапы против врагов текущего матча
-        matchups = await od.matchups(my_hero_id)
-        by_id = {m["hero_id"]: m for m in matchups}
-        rows = []
-        for eid in enemy_hero_ids:
-            m = by_id.get(eid)
-            if not m or not m.get("games_played"):
-                continue
-            wr = m["wins"] / m["games_played"] * 100
-            rows.append((await od.hero_name(eid), wr, m["games_played"]))
-        rows.sort(key=lambda x: x[1])  # снизу — самые опасные для вас контрпики
-
-        # 2) рекомендованные предметы под вашего героя
-        item_recs = await od.item_recommendations(my_hero_id, per_phase=4)
-
-        my_name = await od.hero_name(my_hero_id)
-
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        rows = await cog.compute_weekly_leaderboard(interaction.guild)
+        lines = [f"**{i}.** {name} — {games} игр, {wins}W, WR {wr:.1f}%"
+                 for i, (_, name, games, wins, wr) in enumerate(rows[:10], 1)]
         embed = discord.Embed(
-            title=f"Live-матч — вы играете {my_name}",
-            color=0x8B4513,
-        )
-
-        matchup_lines = [f"{name} — ваш WR против него **{wr:.1f}%** ({games} игр)"
-                          for name, wr, games in rows]
-        embed.add_field(
-            name="⚔️ Матчапы против врагов",
-            value="\n".join(matchup_lines) or "Данных недостаточно",
-            inline=False,
-        )
-
-        for phase, lines in item_recs.items():
-            embed.add_field(name=f"🛒 {phase}", value="\n".join(lines), inline=True)
-
-        embed.set_footer(text="Внизу списка матчапов — герои, против которых у вас хуже всего винрейт")
-
-        # 3) LLM-стратегия поверх этих же цифр (если включена и настроен ключ)
-        strategy_text = await strategy_writer.write(
-            my_hero_name=my_name,
-            matchup_rows=rows,
-            item_recs=item_recs,
-            my_hero_id=my_hero_id,
-            enemy_hero_ids=enemy_hero_ids,
-        )
-        if strategy_text:
-            # Discord ограничивает поле embed 1024 символами — режем с запасом
-            embed.add_field(name="🧠 Стратегия (LLM на основе данных выше)",
-                             value=strategy_text[:1000], inline=False)
-
+            title=f"🏆 Лидерборд недели — {interaction.guild.name}",
+            description="\n".join(lines) or "Нет данных за последние 7 дней",
+            color=0x8B4513)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -584,83 +726,212 @@ class DotaStats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = Storage(DB_PATH)
-        self.live_state: dict[int, dict] = {}  # discord_id -> {my_hero_id, enemy_hero_ids, updated_at}
-        self.poll_live_matches.start()
+        self.poll_status.start()
+        self.poll_new_matches.start()
+        self.check_weekly_leaderboard.start()
 
     def cog_unload(self):
-        self.poll_live_matches.cancel()
+        self.poll_status.cancel()
+        self.poll_new_matches.cancel()
+        self.check_weekly_leaderboard.cancel()
 
     async def cog_load(self):
         self.bot.add_view(DashboardView(self.db))
 
-    @tasks.loop(seconds=STEAM_POLL_INTERVAL_SECONDS)
-    async def poll_live_matches(self):
+    # ---------- 1+2+3: статус "в игре", доска, детект пати ----------
+
+    @tasks.loop(seconds=STATUS_POLL_INTERVAL_SECONDS)
+    async def poll_status(self):
         players = self.db.all_players()
         if not players:
             return
 
         steam_ids = [p[2] for p in players]
-        # Steam API принимает до 100 steamid за один запрос — бьём на пачки
         summaries: list[dict] = []
-        for i in range(0, len(steam_ids), 100):
+        for i in range(0, len(steam_ids), 100):  # Steam API — максимум 100 id за запрос
             summaries += await steam_client.get_player_summaries(steam_ids[i:i + 100])
-        if STEAM_DEBUG_LOG and summaries:
-            print(f"[STEAM] сводки: {summaries[:2]} ...")
+        if DEBUG_LOG and summaries:
+            print(f"[STEAM] пример сводки: {summaries[0]}")
 
         summary_by_steamid = {int(s["steamid"]): s for s in summaries if "steamid" in s}
 
-        # группируем игроков по server_steam_id, чтобы не дублировать запросы к одному матчу
-        server_to_entries: dict[str, list[tuple[int, int]]] = {}
+        playing_ids: list[int] = []
+        lobby_groups: dict[str, list[int]] = {}
         for discord_id, account_id, steam_id64 in players:
             s = summary_by_steamid.get(steam_id64)
             if not s or s.get("gameid") != "570":
                 continue
-            server_id = s.get("gameserversteamid")
-            if not server_id:
-                continue
-            server_to_entries.setdefault(server_id, []).append((discord_id, account_id))
+            playing_ids.append(discord_id)
+            lobby_id = s.get("lobbysteamid")
+            if lobby_id and lobby_id != "0":
+                lobby_groups.setdefault(lobby_id, []).append(discord_id)
 
-        for server_id, entries in server_to_entries.items():
-            stats = await steam_client.get_realtime_stats(server_id)
-            if not stats:
-                continue
-            if STEAM_DEBUG_LOG:
-                print(f"[STEAM] realtime stats keys для сервера {server_id}: {list(stats.keys())}")
+        self._playing_ids = playing_ids
+        self._party_groups = [ids for ids in lobby_groups.values() if len(ids) > 1]
+        await self._refresh_status_boards()
 
-            # ПРОВЕРЬТЕ через STEAM_DEBUG_LOG, что структура ниже совпадает с реальным ответом —
-            # схема Valve может отличаться по версии.
-            teams = stats.get("teams", [])
-            acc_info: dict[int, tuple] = {}
-            for team in teams:
-                team_number = team.get("team_number")
-                for pl in team.get("players", []):
-                    acc = pl.get("accountid")
-                    hero_id = pl.get("heroid")
-                    if acc is not None and hero_id:
-                        acc_info[acc] = (team_number, hero_id)
-
-            for discord_id, account_id in entries:
-                info = acc_info.get(account_id)
-                if not info:
-                    continue
-                my_team, my_hero_id = info
-                enemy_ids = [hid for acc, (tn, hid) in acc_info.items()
-                             if tn != my_team and acc != account_id]
-                if enemy_ids:
-                    self.live_state[discord_id] = {
-                        "my_hero_id": my_hero_id,
-                        "enemy_hero_ids": enemy_ids,
-                        "updated_at": time.time(),
-                    }
-
-    @poll_live_matches.before_loop
-    async def before_poll(self):
+    @poll_status.before_loop
+    async def before_poll_status(self):
         await self.bot.wait_until_ready()
+
+    async def _refresh_status_boards(self):
+        for guild_id, channel_id, message_id in self.db.all_status_boards():
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                continue
+
+            playing_members = [guild.get_member(did) for did in getattr(self, "_playing_ids", [])]
+            playing_members = [m for m in playing_members if m]
+            playing_lines = [f"🟢 {m.mention}" for m in playing_members] or ["Сейчас никто не играет"]
+
+            party_lines = []
+            for group in getattr(self, "_party_groups", []):
+                members = [guild.get_member(did) for did in group]
+                members = [m for m in members if m]
+                if len(members) > 1:
+                    names = ", ".join(m.mention for m in members)
+                    party_lines.append(f"🎉 Играют вместе: {names}")
+
+            embed = discord.Embed(title="🎮 Кто сейчас играет", color=0x8B4513,
+                                   timestamp=datetime.now(timezone.utc))
+            embed.add_field(name=f"В игре ({len(playing_members)})",
+                             value="\n".join(playing_lines), inline=False)
+            if party_lines:
+                embed.add_field(name="Совместные пати", value="\n".join(party_lines), inline=False)
+            embed.set_footer(text=f"Обновляется автоматически каждые ~{STATUS_POLL_INTERVAL_SECONDS} сек")
+
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.edit(embed=embed)
+            except discord.NotFound:
+                msg = await channel.send(embed=embed)
+                self.db.set_status_board(guild_id, channel_id, msg.id)
+            except discord.Forbidden:
+                if DEBUG_LOG:
+                    print(f"[STATUS BOARD] нет прав в канале {channel_id}")
+
+    # ---------- 4: разбор завершённых матчей ----------
+
+    @tasks.loop(minutes=MATCH_POLL_INTERVAL_MINUTES)
+    async def poll_new_matches(self):
+        for discord_id, account_id, steam_id64, last_match_id in self.db.all_players_full():
+            try:
+                recent = await od.get(f"/players/{account_id}/recentMatches")
+                if not recent:
+                    continue
+                newest = recent[0]
+                if newest["match_id"] == last_match_id:
+                    continue
+                self.db.update_last_match(discord_id, newest["match_id"])
+                if last_match_id == 0:
+                    continue  # первый прогон после привязки — не шлём разбор старого матча
+                await self._send_match_review(discord_id, account_id, newest["match_id"])
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[MATCH REVIEW] ошибка для {discord_id}: {e}")
+            await asyncio.sleep(1)  # не долбить OpenDota подряд
+
+    @poll_new_matches.before_loop
+    async def before_poll_matches(self):
+        await self.bot.wait_until_ready()
+
+    async def _send_match_review(self, discord_id: int, account_id: int, match_id: int):
+        facts = await build_match_facts(account_id, match_id)
+        if not facts:
+            return
+        issues = detect_issues(facts)
+        review_text = await match_reviewer.write_review(facts, issues)
+
+        result_word = "🟢 Победа" if facts["won"] else "🔴 Поражение"
+        embed = discord.Embed(
+            title=f"Разбор матча — {facts['hero']} ({result_word})",
+            url=f"https://www.dotabuff.com/matches/{match_id}",
+            color=0x2ecc71 if facts["won"] else 0xe74c3c,
+        )
+        embed.add_field(name="KDA", value=f"{facts['kills']}/{facts['deaths']}/{facts['assists']}")
+        embed.add_field(name="Длительность", value=f"{facts['duration_min']} мин")
+        gpm_med = f" (медиана {facts['gpm_median']:.0f})" if facts["gpm_median"] else ""
+        xpm_med = f" (медиана {facts['xpm_median']:.0f})" if facts["xpm_median"] else ""
+        embed.add_field(name="GPM / XPM", value=f"{facts['gpm']}{gpm_med} / {facts['xpm']}{xpm_med}", inline=False)
+        embed.add_field(name="Добивания", value=f"{facts['last_hits']} ({facts['lh_per_min']}/мин)")
+        embed.add_field(name="Урон герою / башням", value=f"{facts['hero_damage']} / {facts['tower_damage']}")
+        embed.add_field(name="⚠️ Возможные проблемы", value="\n".join(issues), inline=False)
+        if review_text:
+            embed.add_field(name="🧠 Разбор от тренера (LLM)", value=review_text[:1000], inline=False)
+
+        user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
+        try:
+            await user.send(embed=embed)
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+        # fallback: если ЛС закрыты — постим в канал с панелью на любом сервере, где есть этот игрок
+        for guild_id, channel_id, _ in self.db.all_dashboards():
+            guild = self.bot.get_guild(guild_id)
+            if not guild or not guild.get_member(discord_id):
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel:
+                await channel.send(content=f"<@{discord_id}>", embed=embed)
+            break
+
+    # ---------- 5: еженедельный лидерборд ----------
+
+    async def compute_weekly_leaderboard(self, guild: discord.Guild) -> list[tuple]:
+        rows = []
+        for discord_id, account_id, steam_id64 in self.db.all_players():
+            if guild and not guild.get_member(discord_id):
+                continue
+            matches = await od.player_matches_since(account_id, days=7)
+            if not matches:
+                continue
+            games = len(matches)
+            wins = sum(1 for m in matches if (m["player_slot"] < 128) == m["radiant_win"])
+            wr = wins / games * 100
+            member = guild.get_member(discord_id) if guild else None
+            name = member.display_name if member else str(discord_id)
+            rows.append((discord_id, name, games, wins, wr))
+            await asyncio.sleep(0.3)  # не долбить OpenDota подряд
+        rows.sort(key=lambda r: (r[2], r[4]), reverse=True)  # сначала по кол-ву игр, потом по WR
+        return rows
+
+    @tasks.loop(hours=24)
+    async def check_weekly_leaderboard(self):
+        now = datetime.now(timezone.utc)
+        if now.weekday() != 0:  # постим только по понедельникам
+            return
+        week_key = now.strftime("%G-W%V")
+        for guild_id, channel_id, _ in self.db.all_dashboards():
+            if self.db.leaderboard_posted(guild_id, week_key):
+                continue
+            guild = self.bot.get_guild(guild_id)
+            channel = guild.get_channel(channel_id) if guild else None
+            if not channel:
+                continue
+            rows = await self.compute_weekly_leaderboard(guild)
+            lines = [f"**{i}.** {name} — {games} игр, {wins}W, WR {wr:.1f}%"
+                     for i, (_, name, games, wins, wr) in enumerate(rows[:10], 1)]
+            embed = discord.Embed(
+                title="🏆 Итоги недели",
+                description="\n".join(lines) or "Недостаточно данных за эту неделю",
+                color=0x8B4513)
+            await channel.send(embed=embed)
+            self.db.mark_leaderboard_posted(guild_id, week_key)
+
+    @check_weekly_leaderboard.before_loop
+    async def before_leaderboard(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- разовая настройка ----------
 
     @commands.command(name="dota_setup")
     @commands.has_permissions(manage_channels=True)
     async def setup_panel(self, ctx: commands.Context):
-        """Разово ставит/обновляет панель в текущем канале."""
+        """Разово ставит/обновляет панель с кнопками в текущем канале."""
         embed = discord.Embed(
             title="🎮 Dota Stats",
             description="Нажмите кнопку ниже, чтобы получить свою статистику. "
@@ -674,6 +945,20 @@ class DotaStats(commands.Cog):
             await msg.pin()
         except discord.Forbidden:
             pass
+
+    @commands.command(name="dota_status_board")
+    @commands.has_permissions(manage_channels=True)
+    async def setup_status_board(self, ctx: commands.Context):
+        """Разово создаёт автообновляемую доску "кто сейчас играет" в текущем канале."""
+        embed = discord.Embed(title="🎮 Кто сейчас играет",
+                               description="Обновляется автоматически...", color=0x8B4513)
+        msg = await ctx.send(embed=embed)
+        self.db.set_status_board(ctx.guild.id, ctx.channel.id, msg.id)
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            pass
+        await ctx.send("Доска создана, дальше бот сам будет её обновлять.")
 
 
 async def setup(bot: commands.Bot):
