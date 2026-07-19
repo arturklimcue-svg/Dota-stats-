@@ -109,12 +109,12 @@ STEAM64_OFFSET = 76561197960265728
 DB_PATH = Path(__file__).parent / "dota_stats.db"
 
 # --- настройте под себя ---
-STEAM_API_KEY = ""C5BD806939B9711D9722489FB77DF41"   # https://steamcommunity.com/dev/apikey (обязательно)
+STEAM_API_KEY = "C5BD806939B9711D9722489FB77DF41"   # https://steamcommunity.com/dev/apikey (обязательно)
 
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
 LLM_PROVIDER = "groq"  # "groq" | "deepseek" | "none" (none = только жёсткие правила, без текста)
 
-GROQ_API_KEY = ""gsk_SV21LUFhGHMmGQxO5M2hWGdyb3FYcDdIPrOA8rMKrkvT4UFt0ZA"           # https://console.groq.com/keys (бесплатно, без карты)
+GROQ_API_KEY = "gsk_SV21LUFhGHMmGQxO5M2hWGdyb3FYcDdIPrOA8rMKrkvT4UFt0ZA"           # https://console.groq.com/keys (бесплатно, без карты)
 GROQ_MODEL = "llama-3.3-70b-versatile"       # актуальную модель проверьте на console.groq.com/docs/models
 GROQ_API_BASE = "https://api.groq.com/openai/v1"  # OpenAI-совместимый эндпоинт
 
