@@ -60,6 +60,9 @@ RANK_RESYNC_INTERVAL_HOURS = 24
 
 INFO_CATEGORY = "📋 Начало"
 INFO_TEXT_CHANNELS = ["📜-правила", "📢-объявления"]  # + VERIFICATION_CHANNEL создаётся отдельно
+
+SHOP_CHANNEL = "🛒-магазин"
+
 COMMUNITY_CATEGORY = "💬 Таверна"
 COMMUNITY_TEXT_CHANNELS = ["👋-приветствия", "💬-общий-чат", "🖼-скриншоты",
                            "🎬-клипы-и-фейлы", "😂-мемы", "🎉-ивенты", SHOP_CHANNEL]
@@ -70,8 +73,6 @@ STRATEGY_TEXT_CHANNELS = ["🏆-лидерборд", "🟢-кто-в-игре", 
 GAME_CATEGORY = "🎮 Игровое"
 LFG_CHANNEL = "🔍-лфг"
 GAME_TEXT_CHANNELS = [LFG_CHANNEL, "🛒-трейд-предметов", "🐲-бестиарий-героев"]
-
-SHOP_CHANNEL = "🛒-магазин"
 
 RANK_VOICE_NAMES = ["🔊 Radiant", "🔊 Dire"]  # по 2 голосовых в каждой ранговой категории
 
