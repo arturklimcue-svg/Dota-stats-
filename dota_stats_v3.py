@@ -94,6 +94,7 @@ Dota статистика v4 — без слэш-команд, всё через
 
 import asyncio
 import os
+import re
 import sqlite3
 import time
 import typing
@@ -129,6 +130,74 @@ def _resolve_db_path() -> Path:
 
 
 DB_PATH = _resolve_db_path()
+
+
+def _resolve_backup_channel_id() -> int:
+    """ID приватного текстового канала, который служит "источником правды"
+    для привязок discord_id <-> SteamID (см. класс PlayerBackup ниже).
+
+    Идея: локальная SQLite (DB_PATH) — это просто быстрый кэш поверх этого
+    канала. Если SQLite пропадёт целиком (редеплой без персистентного
+    диска, смена хостинга, ручное удаление файла и т.п.) — при следующем
+    старте бот перечитает историю канала и восстановит всех привязанных
+    игроков, ничего не спрашивая у пользователей заново.
+
+    ID канала намеренно берётся из переменной окружения, а НЕ хранится в
+    самой SQLite/файле рядом с кодом — иначе получилась бы курица и яйцо:
+    та же самая база, которую мы страхуем, хранила бы адрес своей же
+    страховки.
+
+    Как получить ID канала: в Discord включите Режим разработчика
+    (Настройки -> Расширенные), затем ПКМ по каналу -> "Копировать ID".
+    Канал должен быть приватным (права видят только бот и, по желанию,
+    админы сервера) — туда попадают Steam-профили игроков."""
+    raw = os.environ.get("PLAYER_BACKUP_CHANNEL_ID", "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[WARN] PLAYER_BACKUP_CHANNEL_ID='{raw}' — не похоже на ID канала (число). "
+              f"Бэкап привязок в Discord отключён, работаем только с локальной SQLite.")
+        return 0
+
+
+PLAYER_BACKUP_CHANNEL_ID = _resolve_backup_channel_id()
+
+# Маркер в начале сообщения-бэкапа — по нему бот отличает "свои" служебные
+# сообщения от любых других (например, если админ что-то написал в тот же
+# канал руками) при сканировании истории канала.
+_BACKUP_MARKER = "🔗 DOTA_LINK"
+_BACKUP_FIELD_RE = re.compile(r"^(discord_id|account_id|steam_id64):\s*(\d+)\s*$", re.MULTILINE)
+
+
+def _format_backup_message(discord_id: int, account_id: int, steam_id64: int) -> str:
+    """Текст сообщения-бэкапа. Специально простой текст (не embed) — так
+    его проще и надёжнее парсить обратно построчным регэкспом, плюс он
+    без проблем читается админом сервера глазами прямо в канале."""
+    return (
+        f"{_BACKUP_MARKER}\n"
+        f"Игрок: <@{discord_id}>\n"
+        f"discord_id: {discord_id}\n"
+        f"account_id: {account_id}\n"
+        f"steam_id64: {steam_id64}"
+    )
+
+
+def _parse_backup_message(content: str) -> dict | None:
+    """Обратный парсинг _format_backup_message(). Возвращает None, если
+    сообщение не наше (нет маркера) или в нём не хватает полей —
+    такие сообщения при синхронизации просто игнорируются, а не роняют
+    весь процесс восстановления."""
+    if _BACKUP_MARKER not in content:
+        return None
+    fields = dict(_BACKUP_FIELD_RE.findall(content))
+    if not {"discord_id", "account_id", "steam_id64"} <= fields.keys():
+        return None
+    try:
+        return {k: int(v) for k, v in fields.items()}
+    except ValueError:
+        return None
 
 # --- настройте под себя ---
 # Ключи теперь читаются ТОЛЬКО из переменных окружения (не хранятся в коде/репозитории).
@@ -259,6 +328,15 @@ class Storage:
             guild_id INTEGER NOT NULL,
             kind TEXT NOT NULL
         )""")
+        # discord_id -> id сообщения в приватном канале-бэкапе (см.
+        # PLAYER_BACKUP_CHANNEL_ID). Это just кэш для быстрого edit()
+        # вместо поиска по всей истории канала — если строки тут нет
+        # (или она "протухла", сообщение удалено), код просто ищет
+        # по содержимому истории канала заново, это не критично.
+        c.execute("""CREATE TABLE IF NOT EXISTS backup_messages (
+            discord_id INTEGER PRIMARY KEY,
+            message_id INTEGER NOT NULL
+        )""")
         c.commit()
 
     def register(self, discord_id: int, account_id: int, steam_id64: int):
@@ -288,6 +366,18 @@ class Storage:
     def update_last_match(self, discord_id: int, match_id: int):
         self.conn.execute(
             "UPDATE players SET last_match_id=? WHERE discord_id=?", (match_id, discord_id))
+        self.conn.commit()
+
+    def get_backup_message_id(self, discord_id: int):
+        row = self.conn.execute(
+            "SELECT message_id FROM backup_messages WHERE discord_id=?", (discord_id,)).fetchone()
+        return row[0] if row else None
+
+    def set_backup_message_id(self, discord_id: int, message_id: int):
+        self.conn.execute(
+            "INSERT INTO backup_messages (discord_id, message_id) VALUES (?, ?) "
+            "ON CONFLICT(discord_id) DO UPDATE SET message_id=excluded.message_id",
+            (discord_id, message_id))
         self.conn.commit()
 
     def set_dashboard(self, guild_id: int, channel_id: int, message_id: int):
@@ -1009,6 +1099,19 @@ class RegisterModal(discord.ui.Modal, title="Привязать SteamID"):
             return
         self.db.register(interaction.user.id, account_id, steam_id64)
         name = profile["profile"].get("personaname", "игрок")
+
+        # Дублируем привязку в приватный канал-бэкап (если он настроен) —
+        # это и есть "источник правды" на случай потери локальной SQLite.
+        # Делаем это до ответа пользователю, но не даём сбою бэкапа
+        # сломать саму привязку: она уже сохранена в SQLite выше.
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        if cog:
+            try:
+                await cog.backup_player_to_channel(interaction.user.id, account_id, steam_id64)
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[BACKUP] не удалось записать привязку {interaction.user.id} в канал-бэкап: {e!r}")
+
         await interaction.response.send_message(
             f"Привязал вас к **{name}**. Разбор матчей и статус \"в игре\" заработают "
             f"автоматически.", ephemeral=True)
@@ -1329,10 +1432,12 @@ class DotaStats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = Storage(DB_PATH)
-        self.poll_status.start()
-        self.poll_new_matches.start()
-        self.check_weekly_leaderboard.start()
-        self.check_duel_expiry.start()
+        # ВАЖНО: фоновые опросы (статус, новые матчи и т.д.) читают
+        # self.db.all_players() — если запустить их до того, как локальная
+        # SQLite успеет восстановиться из канала-бэкапа (после чистого
+        # старта/редеплоя), первый цикл-другой отработает по пустому
+        # списку игроков. Поэтому старт циклов не здесь, а в конце
+        # _startup_sequence(), уже после sync_players_from_backup_channel().
 
     def cog_unload(self):
         self.poll_status.cancel()
@@ -1350,14 +1455,37 @@ class DotaStats(commands.Cog):
             self.bot.add_view(DuelReportView(self.db, duel["id"]))
         for duel in self.db.duels_by_status(["disputed"]):
             self.bot.add_view(DuelAdminResolveView(self.db, duel["id"]))
+        self.bot.loop.create_task(self._startup_sequence())
+
+    async def _startup_sequence(self):
+        """Единая последовательность при старте бота — порядок важен:
+        1) дождаться подключения к Discord (кэш каналов/гильдий готов);
+        2) восстановить players из приватного канала-бэкапа (если он
+           настроен и/или локальная SQLite только что создана с нуля);
+        3) и только теперь запускать фоновые опросы, которые читают
+           self.db.all_players() — иначе первый цикл-другой отработает
+           по пустому/неполному списку игроков."""
+        await self.bot.wait_until_ready()
+
+        try:
+            restored = await self.sync_players_from_backup_channel()
+            if PLAYER_BACKUP_CHANNEL_ID and DEBUG_LOG:
+                print(f"[BACKUP] синхронизация при старте: {restored} привязок из канала")
+        except Exception as e:
+            print(f"[BACKUP] ошибка синхронизации из канала-бэкапа при старте: {e!r}")
+
+        self.poll_status.start()
+        self.poll_new_matches.start()
+        self.check_weekly_leaderboard.start()
+        self.check_duel_expiry.start()
+
         # чтобы не приходилось руками гонять !dota_setup после каждого
         # обновления кода — при каждом рестарте бота уже существующая
         # панель сама перерисовывается с актуальным набором кнопок
-        self.bot.loop.create_task(self._refresh_dashboard_panels_on_start())
-        self.bot.loop.create_task(match_reviewer.self_test())
+        await self._refresh_dashboard_panels_on_start()
+        await match_reviewer.self_test()
 
     async def _refresh_dashboard_panels_on_start(self):
-        await self.bot.wait_until_ready()
         embed = discord.Embed(
             title="🎮 Dota Stats",
             description="Нажмите кнопку ниже, чтобы получить свою статистику. "
@@ -1378,6 +1506,90 @@ class DotaStats(commands.Cog):
             except discord.Forbidden:
                 if DEBUG_LOG:
                     print(f"[DASHBOARD] нет прав редактировать панель в канале {channel_id}")
+
+    # ---------- бэкап привязок discord_id <-> SteamID в приватный канал ----------
+    #
+    # Локальная SQLite (self.db) — единственное место, которое хостинг может
+    # стереть при редеплое (см. комментарий у _resolve_db_path). Чтобы это
+    # не значило "все заново привязывайте SteamID", таблица players
+    # дублируется в приватный Discord-канал: по одному сообщению на игрока,
+    # с discord_id/account_id/steam_id64 в разбираемом виде (см.
+    # _format_backup_message/_parse_backup_message выше). Канал задаётся
+    # переменной окружения PLAYER_BACKUP_CHANNEL_ID.
+    #
+    # Канал — источник правды, SQLite — быстрый кэш поверх него:
+    #   - при регистрации: пишем и в SQLite, и (если канал настроен) в канал;
+    #   - при каждом старте бота: читаем историю канала и заливаем в SQLite
+    #     ДО того, как запускаются фоновые опросы (см. _startup_sequence);
+    #   - командой !dota_backup_resync это можно повторить вручную в любой
+    #     момент, не перезапуская бота.
+
+    async def _get_backup_channel(self) -> discord.abc.Messageable | None:
+        if not PLAYER_BACKUP_CHANNEL_ID:
+            return None
+        channel = self.bot.get_channel(PLAYER_BACKUP_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(PLAYER_BACKUP_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden) as e:
+                print(f"[BACKUP] не могу получить канал-бэкап {PLAYER_BACKUP_CHANNEL_ID}: {e!r} "
+                      f"— проверьте ID и что боту выдан доступ к каналу.")
+                return None
+        return channel
+
+    async def backup_player_to_channel(self, discord_id: int, account_id: int, steam_id64: int):
+        """Дублирует одну привязку в канал-бэкап. Если для игрока уже есть
+        сообщение — редактирует его (без дублей при повторной привязке)."""
+        channel = await self._get_backup_channel()
+        if not channel:
+            return  # бэкап не настроен — молча работаем только с SQLite, как раньше
+        text = _format_backup_message(discord_id, account_id, steam_id64)
+
+        cached_id = self.db.get_backup_message_id(discord_id)
+        if cached_id:
+            try:
+                msg = await channel.fetch_message(cached_id)
+                await msg.edit(content=text)
+                return
+            except (discord.NotFound, discord.Forbidden):
+                pass  # сообщение удалили руками или SQLite это ID не знала — ищем/создаём ниже
+
+        # локального ID сообщения нет или он "протух" — ищем по содержимому
+        # истории канала (например, после того как сама SQLite была
+        # восстановлена из этого же канала и связь discord_id->message_id
+        # локально не сохранилась)
+        async for msg in channel.history(limit=None):
+            if msg.author.id != self.bot.user.id:
+                continue
+            parsed = _parse_backup_message(msg.content)
+            if parsed and parsed["discord_id"] == discord_id:
+                await msg.edit(content=text)
+                self.db.set_backup_message_id(discord_id, msg.id)
+                return
+
+        sent = await channel.send(text)
+        self.db.set_backup_message_id(discord_id, sent.id)
+
+    async def sync_players_from_backup_channel(self) -> int:
+        """Перечитывает всю историю канала-бэкапа и заливает найденные
+        привязки в локальную SQLite (upsert — не трогает last_match_id уже
+        существующих игроков). Возвращает число обработанных привязок.
+        Безопасно вызывать многократно (в т.ч. вручную, !dota_backup_resync) —
+        операция идемпотентна."""
+        channel = await self._get_backup_channel()
+        if not channel:
+            return 0
+        restored = 0
+        async for msg in channel.history(limit=None):
+            if msg.author.id != self.bot.user.id:
+                continue
+            parsed = _parse_backup_message(msg.content)
+            if not parsed:
+                continue
+            self.db.register(parsed["discord_id"], parsed["account_id"], parsed["steam_id64"])
+            self.db.set_backup_message_id(parsed["discord_id"], msg.id)
+            restored += 1
+        return restored
 
     # ---------- 1+2+3: статус "в игре", доска, детект пати ----------
 
@@ -1915,6 +2127,49 @@ class DotaStats(commands.Cog):
         except discord.Forbidden:
             pass
         await ctx.send("Доска создана, дальше бот сам будет её обновлять.")
+
+    @commands.command(name="dota_backup_status")
+    @commands.has_permissions(manage_channels=True)
+    async def backup_status(self, ctx: commands.Context):
+        """Показывает, настроен ли канал-бэкап привязок и сколько игроков
+        привязано локально прямо сейчас."""
+        players_count = len(self.db.all_players())
+        if not PLAYER_BACKUP_CHANNEL_ID:
+            await ctx.send(
+                f"⚠️ Канал-бэкап привязок **не настроен** (нет переменной окружения "
+                f"`PLAYER_BACKUP_CHANNEL_ID`). Сейчас в SQLite привязано игроков: {players_count}. "
+                f"Если хостинг сотрёт базу при редеплое — все привязки пропадут безвозвратно.\n"
+                f"Чтобы включить бэкап: создайте приватный текстовый канал, скопируйте его ID "
+                f"(Режим разработчика -> ПКМ по каналу -> Копировать ID) и задайте его в "
+                f"`PLAYER_BACKUP_CHANNEL_ID` на хостинге.")
+            return
+        channel = await self._get_backup_channel()
+        if not channel:
+            await ctx.send(
+                f"❌ `PLAYER_BACKUP_CHANNEL_ID={PLAYER_BACKUP_CHANNEL_ID}` задан, но бот не может "
+                f"получить доступ к этому каналу. Проверьте, что ID верный и у бота есть права "
+                f"видеть канал/читать историю/писать сообщения.")
+            return
+        await ctx.send(
+            f"✅ Канал-бэкап: {channel.mention}. В SQLite привязано игроков: {players_count}. "
+            f"Команда `!dota_backup_resync` перечитает канал и восстановит SQLite вручную.")
+
+    @commands.command(name="dota_backup_resync")
+    @commands.has_permissions(manage_channels=True)
+    async def backup_resync(self, ctx: commands.Context):
+        """Принудительно пересобирает локальную SQLite из канала-бэкапа,
+        не дожидаясь рестарта бота. Полезно, если подозреваете, что
+        локальные данные и канал разошлись."""
+        if not PLAYER_BACKUP_CHANNEL_ID:
+            await ctx.send("⚠️ Канал-бэкап не настроен (см. `!dota_backup_status`) — нечего синхронизировать.")
+            return
+        async with ctx.typing():
+            try:
+                restored = await self.sync_players_from_backup_channel()
+            except Exception as e:
+                await ctx.send(f"❌ Ошибка синхронизации: `{e}`")
+                return
+        await ctx.send(f"✅ Синхронизировано {restored} привязок из канала-бэкапа в локальную SQLite.")
 
 
 async def setup(bot: commands.Bot):
