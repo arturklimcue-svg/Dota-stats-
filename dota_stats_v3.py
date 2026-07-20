@@ -500,11 +500,11 @@ class Storage:
         # миграция для БД, созданных предыдущей версией (без last_match_id)
         try:
             c.execute("ALTER TABLE players ADD COLUMN last_match_id INTEGER DEFAULT 0")
-        except sqlite3.IntegrityError:
+        except sqlite3.OperationalError:
             pass  # колонка уже есть
         try:
             c.execute("ALTER TABLE players ADD COLUMN dm_muted INTEGER DEFAULT 0")
-        except sqlite3.IntegrityError:
+        except sqlite3.OperationalError:
             pass  # колонка уже есть
 
         c.execute("""CREATE TABLE IF NOT EXISTS dashboard (
