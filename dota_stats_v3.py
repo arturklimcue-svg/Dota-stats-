@@ -229,6 +229,139 @@ def _parse_backup_message(content: str) -> dict | None:
     except ValueError:
         return None
 
+
+# --- бэкап экономики (балансы + покупки) ---
+_ECONOMY_FIELD_RE = re.compile(r"^(discord_id|balance|total_earned|total_spent|titles|role_color):\s*(.+?)\s*$", re.MULTILINE)
+
+def _format_economy_backup(discord_id: int, balance: int, total_earned: int,
+                            total_spent: int, titles: list[str], role_color: str | None) -> str:
+    titles_str = ",".join(titles) if titles else ""
+    lines = [
+        _ECONOMY_BACKUP_MARKER,
+        f"discord_id: {discord_id}",
+        f"balance: {balance}",
+        f"total_earned: {total_earned}",
+        f"total_spent: {total_spent}",
+        f"titles: {titles_str}",
+        f"role_color: {role_color or ''}",
+    ]
+    return "\n".join(lines)
+
+def _parse_economy_backup(content: str) -> dict | None:
+    if _ECONOMY_BACKUP_MARKER not in content:
+        return None
+    fields = dict(_ECONOMY_FIELD_RE.findall(content))
+    if "discord_id" not in fields:
+        return None
+    try:
+        return {
+            "discord_id": int(fields["discord_id"]),
+            "balance": int(fields.get("balance", 0)),
+            "total_earned": int(fields.get("total_earned", 0)),
+            "total_spent": int(fields.get("total_spent", 0)),
+            "titles": [t for t in fields.get("titles", "").split(",") if t],
+            "role_color": fields.get("role_color") or None,
+        }
+    except (ValueError, KeyError):
+        return None
+
+
+# --- бэкап достижений ---
+_ACHIEVEMENT_FIELD_RE = re.compile(r"^(discord_id|achievements):\s*(.+?)\s*$", re.MULTILINE)
+
+def _format_achievement_backup(discord_id: int, achievements: list[str]) -> str:
+    return (
+        f"{_ACHIEVEMENT_BACKUP_MARKER}\n"
+        f"discord_id: {discord_id}\n"
+        f"achievements: {','.join(achievements)}"
+    )
+
+def _parse_achievement_backup(content: str) -> dict | None:
+    if _ACHIEVEMENT_BACKUP_MARKER not in content:
+        return None
+    fields = dict(_ACHIEVEMENT_FIELD_RE.findall(content))
+    if "discord_id" not in fields:
+        return None
+    try:
+        return {
+            "discord_id": int(fields["discord_id"]),
+            "achievements": [a for a in fields.get("achievements", "").split(",") if a],
+        }
+    except (ValueError, KeyError):
+        return None
+
+
+# --- бэкап турниров ---
+_TOURNAMENT_FIELD_RE = re.compile(r"^(id|guild_id|name|creator_id|status|max_players|winner_id|participants|matches):\s*(.+?)\s*$", re.MULTILINE)
+
+def _format_tournament_backup(t: dict) -> str:
+    participants = ",".join(str(p) for p in (t.get("participants") or []))
+    match_parts = []
+    for m in (t.get("matches") or []):
+        p1 = m.get("player1_id", "?")
+        p2 = m.get("player2_id", "?")
+        w = m.get("winner_id") or "pending"
+        match_parts.append(f"R{m['round']}S{m['slot']}:{p1}v{p2}:{w}")
+    matches_str = ",".join(match_parts)
+    lines = [
+        _TOURNAMENT_BACKUP_MARKER,
+        f"id: {t['id']}",
+        f"guild_id: {t['guild_id']}",
+        f"name: {t.get('name', '')}",
+        f"creator_id: {t.get('creator_id', 0)}",
+        f"status: {t.get('status', 'signup')}",
+        f"max_players: {t.get('max_players', 16)}",
+        f"winner_id: {t.get('winner_id') or 'null'}",
+        f"participants: {participants}",
+        f"matches: {matches_str}",
+    ]
+    return "\n".join(lines)
+
+def _parse_tournament_backup(content: str) -> dict | None:
+    if _TOURNAMENT_BACKUP_MARKER not in content:
+        return None
+    fields = dict(_TOURNAMENT_FIELD_RE.findall(content))
+    if "id" not in fields:
+        return None
+    try:
+        winner_id_str = fields.get("winner_id", "null")
+        winner_id = None if winner_id_str == "null" else int(winner_id_str)
+        participants = [int(p) for p in fields.get("participants", "").split(",") if p.strip()]
+        matches = []
+        for part in fields.get("matches", "").split(","):
+            if not part.strip():
+                continue
+            try:
+                rnd_s = part.split(":")
+                rs = rnd_s[0]
+                players = rnd_s[1].split("v")
+                winner_str = rnd_s[2]
+                round_num = int(rs[1:rs.index("S")])
+                slot = int(rs[rs.index("S") + 1:])
+                matches.append({
+                    "round": round_num,
+                    "slot": slot,
+                    "player1_id": int(players[0]),
+                    "player2_id": int(players[1]),
+                    "winner_id": None if winner_str == "pending" else int(winner_str),
+                })
+            except (IndexError, ValueError):
+                continue
+        return {
+            "id": int(fields["id"]),
+            "guild_id": int(fields.get("guild_id", 0)),
+            "name": fields.get("name", ""),
+            "creator_id": int(fields.get("creator_id", 0)),
+            "status": fields.get("status", "signup"),
+            "max_players": int(fields.get("max_players", 16)),
+            "winner_id": winner_id,
+            "participants": participants,
+            "matches": matches,
+        }
+    except (ValueError, KeyError):
+        return None
+
+
 # --- настройте под себя ---
 # Ключи теперь читаются ТОЛЬКО из переменных окружения (не хранятся в коде/репозитории).
 # Задайте их на хостинге так же, как DISCORD_BOT_TOKEN — см. README.md.
@@ -255,6 +388,75 @@ DEBUG_LOG = True                             # печатать сырые от�
 DUEL_OFFER_HOURS = 24        # сколько часов действует предложение + сам канал дуэли
                               # ("в пределах дня" — сутки с момента, когда лидерборд опубликован)
 DUEL_CHECK_INTERVAL_MINUTES = 15  # как часто проверять истечение дедлайна дуэли
+
+# --- достижения ---
+ACHIEVEMENTS = {
+    "first_win":     ("🏆", "Первая победа"),
+    "streak_5":      ("🔥", "Серия 5 побед"),
+    "streak_10":     ("⚡", "Серия 10 побед"),
+    "games_100":     ("💯", "Ветеран"),
+    "games_500":     ("🏅", "Полководец"),
+    "duel_win3":     ("🥊", "Боец"),
+    "duel_win10":    ("👑", "Дуэлянт"),
+    "wr_above_60":   ("💎", "Стратег"),
+    "hero_master":   ("🎭", "Мастер героя"),
+    "shards_1000":   ("✨", "Коллекционер"),
+}
+
+# --- виртуальная валюта (shards) ---
+SHARD_WIN_MATCH = 10
+SHARD_LOSS_MATCH = 2
+SHARD_WIN_DUEL = 50
+SHARD_DAILY_BONUS = 5
+SHARD_ACHIEVEMENT = 25
+SHARD_TOURNAMENT_WIN = 200
+SHARD_DAILY_CAP = 500
+SHARD_BET_MIN = 10
+SHARD_BET_MAX = 500
+
+DAILY_BONUS_COOLDOWN_HOURS = 24
+BALANCE_BACKUP_INTERVAL_MINUTES = 5
+
+# --- бэкап-каналы для данных, которые нельзя пересчитать ---
+def _resolve_currency_backup_channel_id() -> int:
+    raw = os.environ.get("CURRENCY_BACKUP_CHANNEL_ID", "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[WARN] CURRENCY_BACKUP_CHANNEL_ID='{raw}' — не число. Бэкап экономики отключён.")
+        return 0
+
+def _resolve_tournament_backup_channel_id() -> int:
+    raw = os.environ.get("TOURNAMENT_BACKUP_CHANNEL_ID", "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[WARN] TOURNAMENT_BACKUP_CHANNEL_ID='{raw}' — не число. Бэкап турниров отключён.")
+        return 0
+
+CURRENCY_BACKUP_CHANNEL_ID = _resolve_currency_backup_channel_id()
+TOURNAMENT_BACKUP_CHANNEL_ID = _resolve_tournament_backup_channel_id()
+
+# маркеры сообщений-бэкапов
+_ECONOMY_BACKUP_MARKER = "💰 ECONOMY_BACKUP"
+_ACHIEVEMENT_BACKUP_MARKER = "🏅 ACHIEVEMENT_BACKUP"
+_TOURNAMENT_BACKUP_MARKER = "🏆 TOURNAMENT_BACKUP"
+
+# --- стартовые товары магазина ---
+DEFAULT_SHOP_ITEMS = [
+    ("Красный ник",       "Изменяет цвет роли на красный",       500,  "role_color", "#E74C3C", "🔴"),
+    ("Синий ник",         "Изменяет цвет роли на синий",         500,  "role_color", "#3498DB", "🔵"),
+    ("Зелёный ник",       "Изменяет цвет роли на зелёный",       500,  "role_color", "#2ECC71", "🟢"),
+    ("Золотой ник",       "Изменяет цвет роли на золотой",       800,  "role_color", "#F1C40F", "🟡"),
+    ("Фиолетовый ник",    "Изменяет цвет роли на фиолетовый",    700,  "role_color", "#9B59B6", "🟣"),
+    ("Титул Легенда",     "Титул в профиле: Легенда",            300,  "title",      "Легенда", "👑"),
+    ("Титул Воин",        "Титул в профиле: Воин",               200,  "title",      "Воин",    "⚔️"),
+    ("Титул Мудрец",      "Титул в профиле: Мудрец",             250,  "title",      "Мудрец",  "🧙"),
+]
 
 
 def to_account_id(steam_id) -> int:
@@ -367,6 +569,92 @@ class Storage:
             discord_id INTEGER PRIMARY KEY,
             message_id INTEGER NOT NULL
         )""")
+
+        # --- достижения ---
+        c.execute("""CREATE TABLE IF NOT EXISTS achievements (
+            discord_id INTEGER NOT NULL,
+            achievement_key TEXT NOT NULL,
+            unlocked_at TEXT NOT NULL,
+            PRIMARY KEY (discord_id, achievement_key)
+        )""")
+
+        # --- виртуальная валюта ---
+        c.execute("""CREATE TABLE IF NOT EXISTS currency (
+            discord_id INTEGER PRIMARY KEY,
+            balance INTEGER NOT NULL DEFAULT 0,
+            total_earned INTEGER NOT NULL DEFAULT 0,
+            total_spent INTEGER NOT NULL DEFAULT 0
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS currency_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS bets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            duel_id INTEGER NOT NULL,
+            bettor_id INTEGER NOT NULL,
+            bet_on_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            UNIQUE(duel_id, bettor_id)
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            cost INTEGER NOT NULL,
+            item_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            emoji TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_purchases (
+            discord_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            purchased_at TEXT NOT NULL,
+            PRIMARY KEY (discord_id, item_id)
+        )""")
+
+        # --- турниры ---
+        c.execute("""CREATE TABLE IF NOT EXISTS tournaments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            creator_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'signup',
+            max_players INTEGER NOT NULL DEFAULT 16,
+            created_at TEXT NOT NULL,
+            winner_id INTEGER
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS tournament_participants (
+            tournament_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            seed INTEGER,
+            PRIMARY KEY (tournament_id, discord_id)
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS tournament_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_id INTEGER NOT NULL,
+            round INTEGER NOT NULL,
+            slot INTEGER NOT NULL,
+            player1_id INTEGER,
+            player2_id INTEGER,
+            winner_id INTEGER,
+            duel_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending'
+        )""")
+
+        # --- seed магазина при первом запуске ---
+        existing_items = c.execute("SELECT COUNT(*) FROM shop_items").fetchone()[0]
+        if existing_items == 0:
+            for name, desc, cost, itype, val, emoji in DEFAULT_SHOP_ITEMS:
+                c.execute("INSERT INTO shop_items (name, description, cost, item_type, value, emoji) "
+                          "VALUES (?, ?, ?, ?, ?, ?)", (name, desc, cost, itype, val, emoji))
+
         c.commit()
 
     def register(self, discord_id: int, account_id: int, steam_id64: int):
@@ -594,6 +882,355 @@ class Storage:
             "SELECT discord_id, wins, losses FROM duel_stats WHERE (wins + losses) > 0 "
             "ORDER BY wins DESC, losses ASC LIMIT ?", (limit,)).fetchall()
 
+    # ==================== достижения ====================
+
+    def grant_achievement(self, discord_id: int, key: str) -> bool:
+        """Выдаёт достижение. Возвращает True если оно было новым."""
+        try:
+            self.conn.execute(
+                "INSERT INTO achievements (discord_id, achievement_key, unlocked_at) VALUES (?, ?, ?)",
+                (discord_id, key, datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_achievements(self, discord_id: int) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT achievement_key FROM achievements WHERE discord_id=?",
+            (discord_id,)).fetchall()
+        return [r[0] for r in rows]
+
+    def get_achievement_count(self, discord_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM achievements WHERE discord_id=?", (discord_id,)).fetchone()
+        return row[0]
+
+    # ==================== виртуальная валюта ====================
+
+    def _ensure_currency_row(self, discord_id: int):
+        self.conn.execute(
+            "INSERT INTO currency (discord_id) VALUES (?) ON CONFLICT(discord_id) DO NOTHING",
+            (discord_id,))
+        self.conn.commit()
+
+    def get_balance(self, discord_id: int) -> int:
+        self._ensure_currency_row(discord_id)
+        row = self.conn.execute(
+            "SELECT balance FROM currency WHERE discord_id=?", (discord_id,)).fetchone()
+        return row[0] if row else 0
+
+    def add_shards(self, discord_id: int, amount: int, reason: str) -> int:
+        """Начисляет shards. Возвращает новый баланс."""
+        self._ensure_currency_row(discord_id)
+        self.conn.execute(
+            "UPDATE currency SET balance = balance + ?, total_earned = total_earned + ? "
+            "WHERE discord_id=?", (amount, amount, discord_id))
+        self.conn.execute(
+            "INSERT INTO currency_transactions (discord_id, amount, reason, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (discord_id, amount, reason, datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+        return self.get_balance(discord_id)
+
+    def spend_shards(self, discord_id: int, amount: int, reason: str) -> int | None:
+        """Тратит shards. Возвращает новый баланс или None если недостаточно."""
+        balance = self.get_balance(discord_id)
+        if balance < amount:
+            return None
+        self.conn.execute(
+            "UPDATE currency SET balance = balance - ?, total_spent = total_spent + ? "
+            "WHERE discord_id=?", (amount, amount, discord_id))
+        self.conn.execute(
+            "INSERT INTO currency_transactions (discord_id, amount, reason, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (discord_id, -amount, reason, datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+        return self.get_balance(discord_id)
+
+    def can_spend(self, discord_id: int, amount: int) -> bool:
+        return self.get_balance(discord_id) >= amount
+
+    def get_daily_earned(self, discord_id: int) -> int:
+        """Сколько shards заработано за последние 24 часа."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS)).isoformat()
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM currency_transactions "
+            "WHERE discord_id=? AND amount > 0 AND created_at > ?",
+            (discord_id, cutoff)).fetchone()
+        return row[0] if row else 0
+
+    def get_last_daily_bonus_time(self, discord_id: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT created_at FROM currency_transactions "
+            "WHERE discord_id=? AND reason='daily_bonus' "
+            "ORDER BY created_at DESC LIMIT 1", (discord_id,)).fetchone()
+        return row[0] if row else None
+
+    def get_transaction_history(self, discord_id: int, limit: int = 5) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT amount, reason, created_at FROM currency_transactions "
+            "WHERE discord_id=? ORDER BY created_at DESC LIMIT ?",
+            (discord_id, limit)).fetchall()
+        return [{"amount": r[0], "reason": r[1], "created_at": r[2]} for r in rows]
+
+    def get_all_balances(self) -> list[tuple]:
+        return self.conn.execute(
+            "SELECT discord_id, balance, total_earned, total_spent FROM currency").fetchall()
+
+    def set_balance_raw(self, discord_id: int, balance: int, total_earned: int, total_spent: int):
+        self.conn.execute(
+            "INSERT INTO currency (discord_id, balance, total_earned, total_spent) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(discord_id) DO UPDATE SET balance=?, total_earned=?, total_spent=?",
+            (discord_id, balance, total_earned, total_spent, balance, total_earned, total_spent))
+        self.conn.commit()
+
+    # ==================== ставки ====================
+
+    def place_bet(self, duel_id: int, guild_id: int, bettor_id: int, bet_on_id: int, amount: int) -> bool:
+        """Ставка на дуэль. Возвращает True если успешно."""
+        try:
+            self.conn.execute(
+                "INSERT INTO bets (guild_id, duel_id, bettor_id, bet_on_id, amount, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, duel_id, bettor_id, bet_on_id, amount,
+                 datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_bets_for_duel(self, duel_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, bettor_id, bet_on_id, amount, status FROM bets WHERE duel_id=?",
+            (duel_id,)).fetchall()
+        return [{"id": r[0], "bettor_id": r[1], "bet_on_id": r[2],
+                 "amount": r[3], "status": r[4]} for r in rows]
+
+    def resolve_bets(self, duel_id: int, winner_id: int):
+        """Выплачивает выигрыш победителям ставок, помечает проигравших."""
+        bets = self.get_bets_for_duel(duel_id)
+        for bet in bets:
+            if bet["status"] != "pending":
+                continue
+            if bet["bet_on_id"] == winner_id:
+                self.conn.execute(
+                    "UPDATE bets SET status='won' WHERE id=?", (bet["id"],))
+                self.add_shards(bet["bettor_id"], bet["amount"], f"bet_win:{duel_id}")
+            else:
+                self.conn.execute(
+                    "UPDATE bets SET status='lost' WHERE id=?", (bet["id"],))
+        self.conn.commit()
+
+    def void_bets(self, duel_id: int):
+        """Аннулирует все ставки на дуэль (возврат средств)."""
+        bets = self.get_bets_for_duel(duel_id)
+        for bet in bets:
+            if bet["status"] == "pending":
+                self.conn.execute(
+                    "UPDATE bets SET status='void' WHERE id=?", (bet["id"],))
+        self.conn.commit()
+
+    # ==================== магазин ====================
+
+    def get_shop_items(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, name, description, cost, item_type, value, emoji FROM shop_items").fetchall()
+        return [{"id": r[0], "name": r[1], "description": r[2], "cost": r[3],
+                 "item_type": r[4], "value": r[5], "emoji": r[6]} for r in rows]
+
+    def get_shop_item(self, item_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id, name, description, cost, item_type, value, emoji "
+            "FROM shop_items WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "name": row[1], "description": row[2], "cost": row[3],
+                "item_type": row[4], "value": row[5], "emoji": row[6]}
+
+    def buy_item(self, discord_id: int, item_id: int) -> bool:
+        item = self.get_shop_item(item_id)
+        if not item:
+            return False
+        if not self.can_spend(discord_id, item["cost"]):
+            return False
+        try:
+            self.conn.execute(
+                "INSERT INTO user_purchases (discord_id, item_id, purchased_at) VALUES (?, ?, ?)",
+                (discord_id, item_id, datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            pass
+        self.spend_shards(discord_id, item["cost"], f"shop:{item['name']}")
+        return True
+
+    def get_user_purchases(self, discord_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT up.item_id, si.name, si.item_type, si.value, si.emoji "
+            "FROM user_purchases up JOIN shop_items si ON up.item_id = si.id "
+            "WHERE up.discord_id=?", (discord_id,)).fetchall()
+        return [{"item_id": r[0], "name": r[1], "item_type": r[2],
+                 "value": r[3], "emoji": r[4]} for r in rows]
+
+    def get_user_titles(self, discord_id: int) -> list[str]:
+        purchases = self.get_user_purchases(discord_id)
+        return [p["value"] for p in purchases if p["item_type"] == "title"]
+
+    def get_user_color(self, discord_id: int) -> str | None:
+        purchases = self.get_user_purchases(discord_id)
+        colors = [p["value"] for p in purchases if p["item_type"] == "role_color"]
+        return colors[-1] if colors else None
+
+    # ==================== турниры ====================
+
+    def create_tournament(self, guild_id: int, name: str, creator_id: int,
+                           max_players: int = 16) -> int | None:
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO tournaments (guild_id, name, creator_id, max_players, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (guild_id, name, creator_id, max_players,
+                 datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+    def get_tournament(self, tournament_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM tournaments WHERE id=?", (tournament_id,)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournaments WHERE id=?", (tournament_id,)).description]
+        return dict(zip(cols, row))
+
+    def get_active_tournament(self, guild_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM tournaments WHERE guild_id=? AND status IN ('signup', 'in_progress') "
+            "ORDER BY id DESC LIMIT 1", (guild_id,)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournaments WHERE guild_id=? AND status IN ('signup', 'in_progress') "
+            "ORDER BY id DESC LIMIT 1", (guild_id,)).description]
+        return dict(zip(cols, row))
+
+    def join_tournament(self, tournament_id: int, discord_id: int) -> bool:
+        try:
+            self.conn.execute(
+                "INSERT INTO tournament_participants (tournament_id, discord_id) VALUES (?, ?)",
+                (tournament_id, discord_id))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def leave_tournament(self, tournament_id: int, discord_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM tournament_participants WHERE tournament_id=? AND discord_id=?",
+            (tournament_id, discord_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_tournament_participants(self, tournament_id: int) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT discord_id FROM tournament_participants WHERE tournament_id=?",
+            (tournament_id,)).fetchall()
+        return [r[0] for r in rows]
+
+    def get_tournament_participant_count(self, tournament_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM tournament_participants WHERE tournament_id=?",
+            (tournament_id,)).fetchone()
+        return row[0]
+
+    def set_tournament_status(self, tournament_id: int, status: str):
+        self.conn.execute(
+            "UPDATE tournaments SET status=? WHERE id=?", (status, tournament_id))
+        self.conn.commit()
+
+    def set_tournament_winner(self, tournament_id: int, winner_id: int):
+        self.conn.execute(
+            "UPDATE tournaments SET winner_id=?, status='finished' WHERE id=?",
+            (winner_id, tournament_id))
+        self.conn.commit()
+
+    def set_tournament_seeds(self, tournament_id: int, seeds: dict[int, int]):
+        """seeds: {discord_id: seed_number}"""
+        for discord_id, seed in seeds.items():
+            self.conn.execute(
+                "UPDATE tournament_participants SET seed=? "
+                "WHERE tournament_id=? AND discord_id=?",
+                (seed, tournament_id, discord_id))
+        self.conn.commit()
+
+    def create_tournament_match(self, tournament_id: int, round_num: int,
+                                 slot: int, player1_id: int, player2_id: int) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO tournament_matches "
+            "(tournament_id, round, slot, player1_id, player2_id, status) "
+            "VALUES (?, ?, ?, ?, ?, 'pending')",
+            (tournament_id, round_num, slot, player1_id, player2_id))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_tournament_match(self, match_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE id=?", (match_id,)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE id=?", (match_id,)).description]
+        return dict(zip(cols, row))
+
+    def get_tournament_matches_by_round(self, tournament_id: int, round_num: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE tournament_id=? AND round=? "
+            "ORDER BY slot", (tournament_id, round_num)).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE tournament_id=? AND round=? "
+            "ORDER BY slot", (tournament_id, round_num)).description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_tournament_matches(self, tournament_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE tournament_id=? ORDER BY round, slot",
+            (tournament_id,)).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournament_matches WHERE tournament_id=? ORDER BY round, slot",
+            (tournament_id,)).description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def set_tournament_match_winner(self, match_id: int, winner_id: int):
+        self.conn.execute(
+            "UPDATE tournament_matches SET winner_id=?, status='finished' WHERE id=?",
+            (winner_id, match_id))
+        self.conn.commit()
+
+    def set_tournament_match_duel(self, match_id: int, duel_id: int):
+        self.conn.execute(
+            "UPDATE tournament_matches SET duel_id=? WHERE id=?",
+            (duel_id, match_id))
+        self.conn.commit()
+
+    def all_tournaments_by_status(self, statuses: list[str], guild_id: int | None = None) -> list[dict]:
+        if guild_id:
+            q = f"SELECT * FROM tournaments WHERE guild_id=? AND status IN ({','.join('?' * len(statuses))})"
+            rows = self.conn.execute(q, (guild_id, *statuses)).fetchall()
+        else:
+            q = f"SELECT * FROM tournaments WHERE status IN ({','.join('?' * len(statuses))})"
+            rows = self.conn.execute(q, statuses).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM tournaments LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
 
 # ---------------- OpenDota client (профиль, мета, предметы, разбор матчей) ----------------
 
@@ -653,6 +1290,48 @@ class OpenDota:
 
     async def item_popularity(self, hero_id: int):
         return await self.get(f"/heroes/{hero_id}/itemPopularity")
+
+    async def matchups(self, hero_id: int):
+        return await self.get(f"/heroes/{hero_id}/matchups") or []
+
+    async def player_hero_stats(self, account_id: int, limit: int = 100) -> list[dict]:
+        """Агрегированная статистика по героям из последних матчей игрока.
+        Возвращает список словарей, отсортированных по количеству игр."""
+        matches = await self.get(f"/players/{account_id}/matches?limit={limit}") or []
+        if not matches:
+            return []
+        heroes: dict[int, dict] = {}
+        for m in matches:
+            hid = m.get("hero_id")
+            if not hid:
+                continue
+            won = (m.get("player_slot", 0) < 128) == m.get("radiant_win")
+            k = m.get("kills", 0)
+            d = m.get("deaths", 0)
+            a = m.get("assists", 0)
+            if hid not in heroes:
+                heroes[hid] = {"hero_id": hid, "games": 0, "wins": 0,
+                               "total_kills": 0, "total_deaths": 0, "total_assists": 0}
+            h = heroes[hid]
+            h["games"] += 1
+            if won:
+                h["wins"] += 1
+            h["total_kills"] += k
+            h["total_deaths"] += d
+            h["total_assists"] += a
+        result = []
+        for h in heroes.values():
+            g = h["games"]
+            result.append({
+                "hero_id": h["hero_id"],
+                "hero_name": await self.hero_name(h["hero_id"]),
+                "games": g,
+                "wins": h["wins"],
+                "wr": h["wins"] / g * 100 if g else 0,
+                "avg_kda": f"{h['total_kills']/g:.1f}/{h['total_deaths']/g:.1f}/{h['total_assists']/g:.1f}" if g else "0/0/0",
+            })
+        result.sort(key=lambda x: x["games"], reverse=True)
+        return result
 
     async def hero_stats(self):
         return await self.get("/heroStats") or []
@@ -1175,6 +1854,194 @@ class HeroPickModal(discord.ui.Modal, title="Предметы под героя"
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ---------------- модалки для валюты, контр-пиков, сравнения ----------------
+
+class BetModal(discord.ui.Modal, title="Сделать ставку"):
+    amount = discord.ui.TextInput(
+        label=f"Сумма ставки (min {SHARD_BET_MIN}, max {SHARD_BET_MAX})",
+        placeholder="напр. 50", max_length=10)
+
+    def __init__(self, db: Storage, duel_id: int, bet_on_id: int):
+        super().__init__()
+        self.db = db
+        self.duel_id = duel_id
+        self.bet_on_id = bet_on_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.amount.value))
+        except ValueError:
+            await interaction.response.send_message("Введите число.", ephemeral=True)
+            return
+        if amount < SHARD_BET_MIN:
+            await interaction.response.send_message(f"Минимум {SHARD_BET_MIN} shards.", ephemeral=True)
+            return
+        if amount > SHARD_BET_MAX:
+            await interaction.response.send_message(f"Максимум {SHARD_BET_MAX} shards.", ephemeral=True)
+            return
+        if self.bet_on_id == interaction.user.id:
+            await interaction.response.send_message("Нельзя ставить на себя.", ephemeral=True)
+            return
+        if not self.db.can_spend(interaction.user.id, amount):
+            balance = self.db.get_balance(interaction.user.id)
+            await interaction.response.send_message(
+                f"Недостаточно shards. Баланс: {balance}.", ephemeral=True)
+            return
+        self.db.spend_shards(interaction.user.id, amount, f"bet:{self.duel_id}")
+        placed = self.db.place_bet(
+            self.duel_id, interaction.guild.id, interaction.user.id,
+            self.bet_on_id, amount)
+        if not placed:
+            await interaction.response.send_message("Не удалось поставить ставку.", ephemeral=True)
+            return
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        if cog:
+            cog._dirty_economy.add(interaction.user.id)
+        await interaction.response.send_message(
+            f"💰 Ставка {amount} shards на <@{self.bet_on_id}> принята!", ephemeral=True)
+
+
+class ShopModal(discord.ui.Modal, title="Магазин Shards"):
+    item_id = discord.ui.TextInput(
+        label="ID товара (число из списка ниже)",
+        placeholder="напр. 1", max_length=5)
+
+    def __init__(self, db: Storage):
+        super().__init__()
+        self.db = db
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            iid = int(str(self.item_id.value))
+        except ValueError:
+            await interaction.response.send_message("Введите число.", ephemeral=True)
+            return
+        item = self.db.get_shop_item(iid)
+        if not item:
+            await interaction.response.send_message("Товар не найден.", ephemeral=True)
+            return
+        balance = self.db.get_balance(interaction.user.id)
+        if balance < item["cost"]:
+            await interaction.response.send_message(
+                f"Недостаточно shards. Нужно: {item['cost']}, у вас: {balance}.", ephemeral=True)
+            return
+        success = self.db.buy_item(interaction.user.id, iid)
+        if not success:
+            await interaction.response.send_message("Ошибка покупки.", ephemeral=True)
+            return
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        if cog:
+            cog._dirty_economy.add(interaction.user.id)
+        await interaction.response.send_message(
+            f"✅ Куплено: {item['emoji'] or ''} **{item['name']}** за {item['cost']} shards!", ephemeral=True)
+
+
+class CounterPickModal(discord.ui.Modal, title="Контр-пик советник"):
+    hero = discord.ui.TextInput(label="Имя героя (ваш)", placeholder="напр. Pudge")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        hero_id = await od.find_hero_id(str(self.hero.value))
+        if not hero_id:
+            await interaction.response.send_message("Герой не найден.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        matchups = await od.matchups(hero_id)
+        if not matchups:
+            await interaction.followup.send("Нет данных по матчапам для этого героя.", ephemeral=True)
+            return
+        hero_name = await od.hero_name(hero_id)
+        rows = []
+        for m in matchups:
+            games = m.get("games_played", 0)
+            if games < 100:
+                continue
+            wr = m.get("wins", 0) / games * 100
+            name = await od.hero_name(m["hero_id"])
+            rows.append((name, wr, games))
+        rows.sort(key=lambda x: x[1])
+        embed = discord.Embed(
+            title=f"🛡 Контр-пики для {hero_name}",
+            description="Худшие матчапы (самый низкий WR — опасные герои):",
+            color=0x8B4513)
+        lines = []
+        for name, wr, games in rows[:10]:
+            bar_len = max(1, int((100 - wr) / 5))
+            bar = "🟥" * bar_len + "⬜" * (20 - bar_len)
+            lines.append(f"**{name}** — WR {wr:.1f}% ({games} игр)\n`{bar}`")
+        embed.add_field(name="Худшие противники", value="\n".join(lines) or "Недостаточно данных",
+                         inline=False)
+        recs = await od.item_recommendations(hero_id, per_phase=3)
+        for phase, items in recs.items():
+            embed.add_field(name=f"🛒 {phase}", value="\n".join(items), inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class CompareModal(discord.ui.Modal, title="Сравнить двух игроков"):
+    player1 = discord.ui.TextInput(
+        label="Игрок 1 (SteamID или @упоминание)", placeholder="напр. 76561198012345678", max_length=40)
+    player2 = discord.ui.TextInput(
+        label="Игрок 2 (SteamID или @упоминание)", placeholder="напр. 76561198098765432", max_length=40)
+
+    def __init__(self, db: Storage):
+        super().__init__()
+        self.db = db
+
+    async def _resolve_account(self, raw: str) -> int | None:
+        raw = raw.strip()
+        if raw.startswith("<@") and raw.endswith(">"):
+            mention_id = int(raw[2:-1].replace("!", ""))
+            return self.db.get_account_id(mention_id)
+        try:
+            return to_account_id(raw)
+        except ValueError:
+            return None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        acc1 = await self._resolve_account(str(self.player1.value))
+        acc2 = await self._resolve_account(str(self.player2.value))
+        if not acc1 or not acc2:
+            await interaction.response.send_message(
+                "Не удалось найти одного из игроков. Укажите SteamID или @упоминание.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        p1, wl1, recent1 = await asyncio.gather(
+            od.get(f"/players/{acc1}"), od.get(f"/players/{acc1}/wl"),
+            od.get(f"/players/{acc1}/recentMatches"))
+        p2, wl2, recent2 = await asyncio.gather(
+            od.get(f"/players/{acc2}"), od.get(f"/players/{acc2}/wl"),
+            od.get(f"/players/{acc2}/recentMatches"))
+        n1 = (p1 or {}).get("profile", {}).get("personaname", f"ID:{acc1}")
+        n2 = (p2 or {}).get("profile", {}).get("personaname", f"ID:{acc2}")
+
+        def _stats(wl_data, recent_data):
+            w = (wl_data or {}).get("win", 0)
+            l = (wl_data or {}).get("lose", 0)
+            total = w + l
+            wr = f"{w/total*100:.1f}%" if total else "N/A"
+            rank = (wl_data or {}).get("rank_tier")
+            rank_name = RANK_TIER_NAMES.get(rank // 10, "N/A") if rank else "N/A"
+            return {"wr": wr, "games": total, "rank": rank_name}
+
+        s1 = _stats(wl1, recent1)
+        s2 = _stats(wl2, recent2)
+
+        embed = discord.Embed(title="⚔️ Сравнение игроков", color=0x8B4513)
+        embed.add_field(name="Параметр", value="Ранг\nWR\nМатчей", inline=True)
+        embed.add_field(name=n1[:50], value=f"{s1['rank']}\n{s1['wr']}\n{s1['games']}", inline=True)
+        embed.add_field(name=n2[:50], value=f"{s2['rank']}\n{s2['wr']}\n{s2['games']}", inline=True)
+
+        def _last_hero(recent_data):
+            if not recent_data:
+                return "нет данных"
+            m = recent_data[0]
+            hero = m.get("hero_id", 0)
+            won = (m.get("player_slot", 0) < 128) == m.get("radiant_win")
+            return f"{'✅' if won else '❌'} {hero}"
+
+        embed.set_footer(text=f"Последний матч: {_last_hero(recent1)} vs {_last_hero(recent2)}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ---------------- persistent dashboard view ----------------
 
 class DashboardView(discord.ui.View):
@@ -1214,6 +2081,15 @@ class DashboardView(discord.ui.View):
             won = (last["player_slot"] < 128) == last["radiant_win"]
             embed.add_field(name="Последний матч",
                              value=f"{hero} — {'Победа' if won else 'Поражение'}", inline=False)
+        # shards + достижения
+        balance = self.db.get_balance(interaction.user.id)
+        embed.add_field(name="💎 Shards", value=str(balance), inline=True)
+        achievements = self.db.get_achievements(interaction.user.id)
+        total_achievements = len(ACHIEVEMENTS)
+        if achievements:
+            emojis = " ".join(ACHIEVEMENTS.get(a, ("❓",))[0] for a in achievements if a in ACHIEVEMENTS)
+            embed.add_field(name=f"🏅 Достижения ({len(achievements)}/{total_achievements})",
+                             value=emojis or "пока нет", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Топ мета героев", emoji="🔥", style=discord.ButtonStyle.secondary, custom_id="dota:meta")
@@ -1301,6 +2177,122 @@ class DashboardView(discord.ui.View):
             return
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @discord.ui.button(label="Shards", emoji="💎", style=discord.ButtonStyle.success,
+                        custom_id="dota:balance", row=2)
+    async def balance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        db = cog.db
+        balance = db.get_balance(interaction.user.id)
+        history = db.get_transaction_history(interaction.user.id, limit=5)
+        embed = discord.Embed(title="💎 Shards", color=0x8B4513)
+        embed.add_field(name="Баланс", value=f"**{balance}** shards", inline=True)
+        if history:
+            lines = []
+            for t in history:
+                sign = "+" if t["amount"] > 0 else ""
+                lines.append(f"{sign}{t['amount']} — {t['reason']}")
+            embed.add_field(name="Последние транзакции", value="\n".join(lines), inline=False)
+        # проверка кулдауна ежедневного бонуса
+        last_bonus = db.get_last_daily_bonus_time(interaction.user.id)
+        can_claim = True
+        if last_bonus:
+            last_dt = datetime.fromisoformat(last_bonus)
+            if datetime.now(timezone.utc) - last_dt < timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS):
+                can_claim = False
+        view = BalanceActionsView(db, can_claim)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=view)
+
+    @discord.ui.button(label="Мои герои", emoji="🎭", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:heroes", row=2)
+    async def heroes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        account_id = self.db.get_account_id(interaction.user.id)
+        if not account_id:
+            await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        hero_stats = await od.player_hero_stats(account_id, limit=100)
+        if not hero_stats:
+            await interaction.followup.send("Нет данных по матчам.", ephemeral=True)
+            return
+        embed = discord.Embed(title="🎭 Ваши герои (последние 100 матчей)", color=0x8B4513)
+        lines = []
+        for i, h in enumerate(hero_stats[:5], 1):
+            lines.append(f"**{i}. {h['hero_name']}** — {h['games']} игр, "
+                         f"{h['wins']}W ({h['wr']:.1f}%), KDA {h['avg_kda']}")
+        embed.description = "\n".join(lines)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Контр-пики", emoji="🛡", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:counterpick", row=2)
+    async def counterpick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CounterPickModal())
+
+    @discord.ui.button(label="Сравнить игроков", emoji="⚔️", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:compare", row=2)
+    async def compare_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CompareModal(self.db))
+
+
+class BalanceActionsView(discord.ui.View):
+    def __init__(self, db: Storage, can_claim_daily: bool):
+        super().__init__(timeout=60)
+        self.db = db
+
+    @discord.ui.button(label="📅 Забрать бонус", emoji="📅", style=discord.ButtonStyle.success,
+                        custom_id="dota:daily_bonus")
+    async def daily_bonus_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        db = cog.db
+        last_bonus = db.get_last_daily_bonus_time(interaction.user.id)
+        if last_bonus:
+            last_dt = datetime.fromisoformat(last_bonus)
+            if datetime.now(timezone.utc) - last_dt < timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS):
+                remaining = timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS) - (datetime.now(timezone.utc) - last_dt)
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                await interaction.response.send_message(
+                    f"Бонус уже получен. Следующий через {hours}ч {minutes}м.", ephemeral=True)
+                return
+        new_bal = db.add_shards(interaction.user.id, SHARD_DAILY_BONUS, "daily_bonus")
+        cog._dirty_economy.add(interaction.user.id)
+        await interaction.response.send_message(
+            f"📅 +{SHARD_DAILY_BONUS} shards! Баланс: {new_bal}", ephemeral=True)
+
+    @discord.ui.button(label="🛒 Магазин", emoji="🛒", style=discord.ButtonStyle.primary,
+                        custom_id="dota:shop")
+    async def shop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        db = cog.db
+        items = db.get_shop_items()
+        balance = db.get_balance(interaction.user.id)
+        embed = discord.Embed(title="🛒 Магазин", color=0x8B4513)
+        embed.set_footer(text=f"Ваш баланс: {balance} shards")
+        lines = []
+        for item in items:
+            can_buy = "✅" if balance >= item["cost"] else "❌"
+            lines.append(f"{can_buy} **{item['id']}.** {item['emoji'] or ''} {item['name']} "
+                         f"— {item['cost']} shards\n   {item['description']}")
+        embed.description = "\n".join(lines)
+        embed.add_field(name="Как купить", value="Введите ID товара в модалке ниже", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(db))
+
+    @discord.ui.button(label="Назад", emoji="↩️", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:balance_back")
+    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.message.delete()
+        await interaction.response.defer()
+
+
+class ShopBuyView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=60)
+        self.db = db
+
+    @discord.ui.button(label="Купить товар", emoji="🛒", style=discord.ButtonStyle.success,
+                        custom_id="dota:shop_buy")
+    async def buy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ShopModal(self.db))
+
 
 # ---------------- дуэль лидеров недели: views ----------------
 #
@@ -1336,6 +2328,7 @@ class DuelOfferView(discord.ui.View):
         self.duel_id = duel_id
         self.accept_btn.custom_id = f"duel:accept:{duel_id}"
         self.decline_btn.custom_id = f"duel:decline:{duel_id}"
+        self.bet_btn.custom_id = f"duel:bet:{duel_id}"
 
     async def _check_slot(self, interaction: discord.Interaction) -> tuple[dict, int] | None:
         duel = self.db.get_duel(self.duel_id)
@@ -1376,6 +2369,52 @@ class DuelOfferView(discord.ui.View):
         await interaction.response.send_message("Вызов отклонён.", ephemeral=False)
         cog: "DotaStats" = interaction.client.get_cog("DotaStats")
         await cog.update_offer_message(duel["id"])
+
+    @discord.ui.button(label="💰 Сделать ставку", style=discord.ButtonStyle.primary)
+    async def bet_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        duel = self.db.get_duel(self.duel_id)
+        if not duel or duel["status"] != "pending":
+            await interaction.response.send_message("Дуэль уже неактуальна.", ephemeral=True)
+            return
+        if interaction.user.id in (duel["player1_id"], duel["player2_id"]):
+            await interaction.response.send_message("Нельзя ставить на свою дуэль.", ephemeral=True)
+            return
+        existing = self.db.get_bets_for_duel(self.duel_id)
+        user_bet = next((b for b in existing if b["bettor_id"] == interaction.user.id), None)
+        if user_bet and user_bet["status"] == "pending":
+            await interaction.response.send_message(
+                "Вы уже сделали ставку на эту дуэль.", ephemeral=True)
+            return
+        view = BetChoiceView(self.db, self.duel_id, duel["player1_id"], duel["player2_id"])
+        await interaction.response.send_message(
+            "На кого ставите?", ephemeral=True, view=view)
+
+
+class BetChoiceView(discord.ui.View):
+    def __init__(self, db: Storage, duel_id: int, p1_id: int, p2_id: int):
+        super().__init__(timeout=60)
+        self.db = db
+        self.duel_id = duel_id
+        self.p1_btn.custom_id = f"duel:bet_choice:{duel_id}:p1"
+        self.p2_btn.custom_id = f"duel:bet_choice:{duel_id}:p2"
+
+    @discord.ui.button(label="Игрок 1", style=discord.ButtonStyle.secondary)
+    async def p1_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        duel = self.db.get_duel(self.duel_id)
+        if not duel:
+            await interaction.response.send_message("Дуэль не найдена.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            BetModal(self.db, self.duel_id, duel["player1_id"]))
+
+    @discord.ui.button(label="Игрок 2", style=discord.ButtonStyle.secondary)
+    async def p2_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        duel = self.db.get_duel(self.duel_id)
+        if not duel:
+            await interaction.response.send_message("Дуэль не найдена.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            BetModal(self.db, self.duel_id, duel["player2_id"]))
 
 
 class DuelReportView(discord.ui.View):
@@ -1456,12 +2495,121 @@ class DuelAdminResolveView(discord.ui.View):
         await self._resolve(interaction, None)
 
 
+# ---------------- турнир: view'ы ----------------
+
+class TournamentSignupView(discord.ui.View):
+    def __init__(self, db: Storage, tournament_id: int):
+        super().__init__(timeout=None)
+        self.db = db
+        self.tournament_id = tournament_id
+        self.signup_btn.custom_id = f"tournament:signup:{tournament_id}"
+
+    @discord.ui.button(label="🎯 Записаться на турнир", style=discord.ButtonStyle.success)
+    async def signup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = self.db.get_tournament(self.tournament_id)
+        if not t or t["status"] != "signup":
+            await interaction.response.send_message("Запись на этот турнир закрыта.", ephemeral=True)
+            return
+        count = self.db.get_tournament_participant_count(self.tournament_id)
+        if count >= t["max_players"]:
+            await interaction.response.send_message("Турнир заполнен.", ephemeral=True)
+            return
+        success = self.db.join_tournament(self.tournament_id, interaction.user.id)
+        if not success:
+            await interaction.response.send_message("Вы уже записаны.", ephemeral=True)
+            return
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        cog._dirty_tournaments.add(self.tournament_id)
+        new_count = self.db.get_tournament_participant_count(self.tournament_id)
+        await interaction.response.send_message(
+            f"✅ Вы записаны! Участников: {new_count}/{t['max_players']}", ephemeral=True)
+
+
+class TournamentBracketView(discord.ui.View):
+    def __init__(self, db: Storage, tournament_id: int):
+        super().__init__(timeout=None)
+        self.db = db
+        self.tournament_id = tournament_id
+
+    def build_bracket_embed(self, guild: discord.Guild) -> discord.Embed:
+        t = self.db.get_tournament(self.tournament_id)
+        if not t:
+            return discord.Embed(title="Турнир не найден", color=0xE74C3C)
+        matches = self.db.get_tournament_matches(self.tournament_id)
+        embed = discord.Embed(title=f"🏆 {t['name']}", color=0x8B4513)
+        embed.set_footer(text=f"Статус: {t['status']} | Участников: "
+                              f"{self.db.get_tournament_participant_count(self.tournament_id)}/{t['max_players']}")
+        if t["winner_id"]:
+            member = guild.get_member(t["winner_id"])
+            name = member.display_name if member else f"<@{t['winner_id']}>"
+            embed.description = f"🏆 Победитель: **{name}**"
+            return embed
+        rounds = {}
+        for m in matches:
+            rounds.setdefault(m["round"], []).append(m)
+        round_names = {1: "Quarter-final", 2: "Semi-final", 3: "Final"}
+        for rnd in sorted(rounds.keys()):
+            lines = []
+            for m in rounds[rnd]:
+                p1 = f"<@{m['player1_id']}>" if m["player1_id"] else "?"
+                p2 = f"<@{m['player2_id']}>" if m["player2_id"] else "?"
+                if m["winner_id"]:
+                    winner = f"<@{m['winner_id']}> ✅"
+                    lines.append(f"M{m['id']}: {p1} vs {p2} → {winner}")
+                else:
+                    lines.append(f"M{m['id']}: {p1} vs {p2} → pending")
+            round_label = round_names.get(rnd, f"Round {rnd}")
+            embed.add_field(name=f"═══ {round_label} ═══", value="\n".join(lines), inline=False)
+        if not matches:
+            embed.description = "Сетка ещё не создана. Ожидание старта."
+        return embed
+
+
+class TournamentMatchView(discord.ui.View):
+    def __init__(self, db: Storage, match_id: int):
+        super().__init__(timeout=None)
+        self.db = db
+        self.match_id = match_id
+        self.report_win.custom_id = f"tmatch:win:{match_id}"
+        self.report_loss.custom_id = f"tmatch:loss:{match_id}"
+
+    @discord.ui.button(label="🏆 Я победил", style=discord.ButtonStyle.success)
+    async def report_win(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._report(interaction, "win")
+
+    @discord.ui.button(label="💀 Я проиграл", style=discord.ButtonStyle.secondary)
+    async def report_loss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._report(interaction, "loss")
+
+    async def _report(self, interaction: discord.Interaction, result: str):
+        m = self.db.get_tournament_match(self.match_id)
+        if not m or m["status"] == "finished":
+            await interaction.response.send_message("Матч уже завершён.", ephemeral=True)
+            return
+        if interaction.user.id not in (m["player1_id"], m["player2_id"]):
+            await interaction.response.send_message("Это не ваш матч.", ephemeral=True)
+            return
+        if result == "win":
+            self.db.set_tournament_match_winner(self.match_id, interaction.user.id)
+        else:
+            opponent = m["player2_id"] if interaction.user.id == m["player1_id"] else m["player1_id"]
+            self.db.set_tournament_match_winner(self.match_id, opponent)
+        await interaction.response.send_message(
+            f"✅ Результат зафиксирован: {'победа' if result == 'win' else 'поражение'}.", ephemeral=True)
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        cog._dirty_tournaments.add(m["tournament_id"])
+        await cog.try_advance_tournament(m["tournament_id"])
+
+
 # ---------------- cog ----------------
 
 class DotaStats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = Storage(DB_PATH)
+        self._dirty_economy: set[int] = set()  # discord_id кого нужно записать в канал-бэкап
+        self._dirty_achievements: set[int] = set()
+        self._dirty_tournaments: set[int] = set()  # tournament_id
         # ВАЖНО: фоновые опросы (статус, новые матчи и т.д.) читают
         # self.db.all_players() — если запустить их до того, как локальная
         # SQLite успеет восстановиться из канала-бэкапа (после чистого
@@ -1474,6 +2622,7 @@ class DotaStats(commands.Cog):
         self.poll_new_matches.cancel()
         self.check_weekly_leaderboard.cancel()
         self.check_duel_expiry.cancel()
+        self.backup_dirty_data.cancel()
 
     async def cog_load(self):
         self.bot.add_view(DashboardView(self.db))
@@ -1485,6 +2634,11 @@ class DotaStats(commands.Cog):
             self.bot.add_view(DuelReportView(self.db, duel["id"]))
         for duel in self.db.duels_by_status(["disputed"]):
             self.bot.add_view(DuelAdminResolveView(self.db, duel["id"]))
+        for t in self.db.all_tournaments_by_status(["in_progress"]):
+            for m in self.db.get_tournament_matches(t["id"]):
+                if m["status"] != "finished" and m["player1_id"] and m["player2_id"]:
+                    self.bot.add_view(TournamentMatchView(self.db, m["id"]))
+            self.bot.add_view(TournamentSignupView(self.db, t["id"]))
         self.bot.loop.create_task(self._startup_sequence())
 
     async def _startup_sequence(self):
@@ -1504,10 +2658,32 @@ class DotaStats(commands.Cog):
         except Exception as e:
             print(f"[BACKUP] ошибка синхронизации из канала-бэкапа при старте: {e!r}")
 
+        try:
+            restored = await self.sync_economy_from_backup()
+            if CURRENCY_BACKUP_CHANNEL_ID and DEBUG_LOG:
+                print(f"[BACKUP] экономика: восстановлено {restored} балансов")
+        except Exception as e:
+            print(f"[BACKUP] ошибка восстановления экономики: {e!r}")
+
+        try:
+            restored = await self.sync_achievements_from_backup()
+            if TOURNAMENT_BACKUP_CHANNEL_ID and DEBUG_LOG:
+                print(f"[BACKUP] достижения: восстановлено {restored} профилей")
+        except Exception as e:
+            print(f"[BACKUP] ошибка восстановления достижений: {e!r}")
+
+        try:
+            restored = await self.sync_tournaments_from_backup()
+            if TOURNAMENT_BACKUP_CHANNEL_ID and DEBUG_LOG:
+                print(f"[BACKUP] турниры: восстановлено {restored} турниров")
+        except Exception as e:
+            print(f"[BACKUP] ошибка восстановления турниров: {e!r}")
+
         self.poll_status.start()
         self.poll_new_matches.start()
         self.check_weekly_leaderboard.start()
         self.check_duel_expiry.start()
+        self.backup_dirty_data.start()
 
         # чтобы не приходилось руками гонять !dota_setup после каждого
         # обновления кода — при каждом рестарте бота уже существующая
@@ -1620,6 +2796,278 @@ class DotaStats(commands.Cog):
             self.db.set_backup_message_id(parsed["discord_id"], msg.id)
             restored += 1
         return restored
+
+    # ---------- бэкап экономики (балансы + покупки) ----------
+
+    async def _get_currency_backup_channel(self) -> discord.abc.Messageable | None:
+        if not CURRENCY_BACKUP_CHANNEL_ID:
+            return None
+        channel = self.bot.get_channel(CURRENCY_BACKUP_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(CURRENCY_BACKUP_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden):
+                return None
+        return channel
+
+    async def sync_economy_from_backup(self) -> int:
+        channel = await self._get_currency_backup_channel()
+        if not channel:
+            return 0
+        restored = 0
+        async for msg in channel.history(limit=None):
+            if msg.author.id != self.bot.user.id:
+                continue
+            parsed = _parse_economy_backup(msg.content)
+            if not parsed:
+                continue
+            self.db.set_balance_raw(
+                parsed["discord_id"], parsed["balance"],
+                parsed["total_earned"], parsed["total_spent"])
+            restored += 1
+        return restored
+
+    async def backup_economy_to_channel(self, discord_id: int):
+        channel = await self._get_currency_backup_channel()
+        if not channel:
+            return
+        balance = self.db.get_balance(discord_id)
+        row = self.db.conn.execute(
+            "SELECT total_earned, total_spent FROM currency WHERE discord_id=?",
+            (discord_id,)).fetchone()
+        total_earned = row[0] if row else 0
+        total_spent = row[1] if row else 0
+        titles = self.db.get_user_titles(discord_id)
+        color = self.db.get_user_color(discord_id)
+        text = _format_economy_backup(discord_id, balance, total_earned, total_spent, titles, color)
+        await self._upsert_backup_msg(channel, discord_id, text, "economy")
+
+    # ---------- бэкап достижений ----------
+
+    async def _get_tournament_backup_channel(self) -> discord.abc.Messageable | None:
+        if not TOURNAMENT_BACKUP_CHANNEL_ID:
+            return None
+        channel = self.bot.get_channel(TOURNAMENT_BACKUP_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(TOURNAMENT_BACKUP_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden):
+                return None
+        return channel
+
+    async def sync_achievements_from_backup(self) -> int:
+        channel = await self._get_tournament_backup_channel()
+        if not channel:
+            return 0
+        restored = 0
+        async for msg in channel.history(limit=None):
+            if msg.author.id != self.bot.user.id:
+                continue
+            parsed = _parse_achievement_backup(msg.content)
+            if not parsed:
+                continue
+            for key in parsed["achievements"]:
+                self.db.grant_achievement(parsed["discord_id"], key)
+            restored += 1
+        return restored
+
+    async def backup_achievements_to_channel(self, discord_id: int):
+        channel = await self._get_tournament_backup_channel()
+        if not channel:
+            return
+        achievements = self.db.get_achievements(discord_id)
+        if not achievements:
+            return
+        text = _format_achievement_backup(discord_id, achievements)
+        await self._upsert_backup_msg(channel, discord_id, text, "achievement")
+
+    # ---------- бэкап турниров ----------
+
+    async def sync_tournaments_from_backup(self) -> int:
+        channel = await self._get_tournament_backup_channel()
+        if not channel:
+            return 0
+        restored = 0
+        async for msg in channel.history(limit=None):
+            if msg.author.id != self.bot.user.id:
+                continue
+            parsed = _parse_tournament_backup(msg.content)
+            if not parsed:
+                continue
+            existing = self.db.get_tournament(parsed["id"])
+            if existing:
+                continue
+            self.db.conn.execute(
+                "INSERT INTO tournaments (id, guild_id, name, creator_id, status, max_players, winner_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (parsed["id"], parsed["guild_id"], parsed["name"],
+                 parsed["creator_id"], parsed["status"], parsed["max_players"],
+                 parsed["winner_id"]))
+            for p_id in parsed["participants"]:
+                self.db.conn.execute(
+                    "INSERT OR IGNORE INTO tournament_participants (tournament_id, discord_id) VALUES (?, ?)",
+                    (parsed["id"], p_id))
+            for m in parsed["matches"]:
+                self.db.conn.execute(
+                    "INSERT INTO tournament_matches "
+                    "(tournament_id, round, slot, player1_id, player2_id, winner_id, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (parsed["id"], m["round"], m["slot"], m["player1_id"],
+                     m["player2_id"], m["winner_id"],
+                     "finished" if m["winner_id"] else "pending"))
+            self.db.conn.commit()
+            restored += 1
+        return restored
+
+    async def backup_tournament_to_channel(self, tournament_id: int):
+        channel = await self._get_tournament_backup_channel()
+        if not channel:
+            return
+        t = self.db.get_tournament(tournament_id)
+        if not t:
+            return
+        t["participants"] = self.db.get_tournament_participants(tournament_id)
+        t["matches"] = self.db.get_tournament_matches(tournament_id)
+        text = _format_tournament_backup(t)
+        await self._upsert_backup_msg(channel, tournament_id, text, "tournament")
+
+    # ---------- универсальный upsert сообщения-бэкапа ----------
+
+    async def _upsert_backup_msg(self, channel, entity_id: int, text: str, kind: str):
+        """Ищет существующее сообщение по entity_id и kind в локальном кэше
+        backup_messages. Если не находит — ищет по содержимому истории канала.
+        Создаёт или редактирует."""
+        cache_key = f"{kind}_{entity_id}"
+        cache_row = self.db.conn.execute(
+            "SELECT message_id FROM backup_messages WHERE discord_id=?",
+            (cache_key,)).fetchone() if kind != "economy" else None
+
+        # для economy используем discord_id как ключ напрямую
+        if kind == "economy":
+            cache_row = self.db.conn.execute(
+                "SELECT message_id FROM backup_messages WHERE discord_id=?",
+                (entity_id,)).fetchone()
+
+        msg_id = cache_row[0] if cache_row else None
+
+        if msg_id:
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(content=text)
+                return
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        # ищем по содержимому
+        marker = text.split("\n")[0]
+        async for msg in channel.history(limit=100):
+            if msg.author.id != self.bot.user.id:
+                continue
+            if msg.content.startswith(marker) and str(entity_id) in msg.content:
+                await msg.edit(content=text)
+                if kind == "economy":
+                    self.db.conn.execute(
+                        "INSERT OR REPLACE INTO backup_messages (discord_id, message_id) VALUES (?, ?)",
+                        (entity_id, msg.id))
+                self.db.conn.commit()
+                return
+
+        sent = await channel.send(text)
+        if kind == "economy":
+            self.db.conn.execute(
+                "INSERT OR REPLACE INTO backup_messages (discord_id, message_id) VALUES (?, ?)",
+                (entity_id, sent.id))
+        self.db.conn.commit()
+
+    # ---------- достижения ----------
+
+    async def check_achievements(self, discord_id: int):
+        """Проверяет все условия достижений и выдаёт новые. Начисляет shards за каждое новое."""
+        existing = set(self.db.get_achievements(discord_id))
+        account_id = self.db.get_account_id(discord_id)
+        if not account_id:
+            return
+
+        # first_win — первый выигранный матч
+        if "first_win" not in existing:
+            recent = await od.get(f"/players/{account_id}/recentMatches")
+            if recent:
+                for m in recent[:50]:
+                    if (m.get("player_slot", 0) < 128) == m.get("radiant_win"):
+                        if self.db.grant_achievement(discord_id, "first_win"):
+                            self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:first_win")
+                            self._dirty_achievements.add(discord_id)
+                            self._dirty_economy.add(discord_id)
+                        break
+
+        # streak_5 / streak_10 — победы подряд
+        recent = await od.get(f"/players/{account_id}/recentMatches")
+        if recent:
+            streak = 0
+            for m in recent:
+                won = (m.get("player_slot", 0) < 128) == m.get("radiant_win")
+                if won:
+                    streak += 1
+                else:
+                    break
+            if streak >= 10 and "streak_10" not in existing:
+                if self.db.grant_achievement(discord_id, "streak_10"):
+                    self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:streak_10")
+                    self._dirty_achievements.add(discord_id)
+                    self._dirty_economy.add(discord_id)
+            if streak >= 5 and "streak_5" not in existing:
+                if self.db.grant_achievement(discord_id, "streak_5"):
+                    self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:streak_5")
+                    self._dirty_achievements.add(discord_id)
+                    self._dirty_economy.add(discord_id)
+
+        # games_100 / games_500
+        wl = await od.get(f"/players/{account_id}/wl")
+        if wl:
+            total = wl.get("win", 0) + wl.get("lose", 0)
+            for key, threshold in [("games_100", 100), ("games_500", 500)]:
+                if total >= threshold and key not in existing:
+                    if self.db.grant_achievement(discord_id, key):
+                        self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, f"achievement:{key}")
+                        self._dirty_achievements.add(discord_id)
+                        self._dirty_economy.add(discord_id)
+
+        # wr_above_60 — винрейт > 60% при 50+ играх
+        if wl:
+            wins = wl.get("win", 0)
+            total = wins + wl.get("lose", 0)
+            if total >= 50 and wins / total > 0.6 and "wr_above_60" not in existing:
+                if self.db.grant_achievement(discord_id, "wr_above_60"):
+                    self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:wr_above_60")
+                    self._dirty_achievements.add(discord_id)
+                    self._dirty_economy.add(discord_id)
+
+        # hero_master — 30+ побед на одном герое
+        hero_stats = await od.player_hero_stats(account_id, limit=100)
+        for h in hero_stats:
+            if h["wins"] >= 30 and "hero_master" not in existing:
+                if self.db.grant_achievement(discord_id, "hero_master"):
+                    self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:hero_master")
+                    self._dirty_achievements.add(discord_id)
+                    self._dirty_economy.add(discord_id)
+                break
+
+        # duel_win3 / duel_win10
+        duel_wins, _ = self.db.get_duel_stats(discord_id)
+        for key, threshold in [("duel_win3", 3), ("duel_win10", 10)]:
+            if duel_wins >= threshold and key not in existing:
+                if self.db.grant_achievement(discord_id, key):
+                    self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, f"achievement:{key}")
+                    self._dirty_achievements.add(discord_id)
+                    self._dirty_economy.add(discord_id)
+
+        # shards_1000
+        balance = self.db.get_balance(discord_id)
+        if balance >= 1000 and "shards_1000" not in existing:
+            if self.db.grant_achievement(discord_id, "shards_1000"):
+                self.db.add_shards(discord_id, SHARD_ACHIEVEMENT, "achievement:shards_1000")
+                self._dirty_achievements.add(discord_id)
+                self._dirty_economy.add(discord_id)
 
     # ---------- 1+2+3: статус "в игре", доска, детект пати ----------
 
@@ -1745,26 +3193,40 @@ class DotaStats(commands.Cog):
         return self._build_review_embed(facts, issues, review_text)
 
     async def _send_match_review(self, discord_id: int, account_id: int, match_id: int):
-        embed = await self.build_match_review(discord_id, account_id, match_id)
-        if not embed:
+        known_account_ids = {acc: did for did, acc, _ in self.db.all_players()}
+        facts = await build_match_facts(account_id, match_id, known_account_ids)
+        if not facts:
             return
+        issues = detect_issues(facts)
+        review_text = await match_reviewer.write_review(facts, issues)
+        embed = self._build_review_embed(facts, issues, review_text)
+
+        # начисление shards за матч
+        if facts["won"]:
+            new_bal = self.db.add_shards(discord_id, SHARD_WIN_MATCH, f"match_win:{match_id}")
+        else:
+            new_bal = self.db.add_shards(discord_id, SHARD_LOSS_MATCH, f"match_loss:{match_id}")
+        self._dirty_economy.add(discord_id)
 
         user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
         try:
             await user.send(embed=embed)
-            return
         except (discord.Forbidden, discord.HTTPException):
-            pass
+            for guild_id, channel_id, _ in self.db.all_dashboards():
+                guild = self.bot.get_guild(guild_id)
+                if not guild or not guild.get_member(discord_id):
+                    continue
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    await channel.send(content=f"<@{discord_id}>", embed=embed)
+                break
 
-        # fallback: если ЛС закрыты — постим в канал с панелью на любом сервере, где есть этот игрок
-        for guild_id, channel_id, _ in self.db.all_dashboards():
-            guild = self.bot.get_guild(guild_id)
-            if not guild or not guild.get_member(discord_id):
-                continue
-            channel = guild.get_channel(channel_id)
-            if channel:
-                await channel.send(content=f"<@{discord_id}>", embed=embed)
-            break
+        # проверка достижений после матча
+        try:
+            await self.check_achievements(discord_id)
+        except Exception as e:
+            if DEBUG_LOG:
+                print(f"[ACHIEVEMENTS] ошибка проверки для {discord_id}: {e!r}")
 
     # ---------- 5: еженедельный лидерборд ----------
 
@@ -1965,12 +3427,30 @@ class DotaStats(commands.Cog):
         p1_id, p2_id = duel["player1_id"], duel["player2_id"]
         if winner_slot is None:
             self.db.set_status(duel["id"], "voided")
+            self.db.void_bets(duel["id"])
         else:
             winner_id = p1_id if winner_slot == 1 else p2_id
             loser_id = p2_id if winner_slot == 1 else p1_id
             self.db.set_winner(duel["id"], winner_id, "confirmed")
             self.db.bump_duel_stats(winner_id, won=True)
             self.db.bump_duel_stats(loser_id, won=False)
+
+            # начисление shards за дуэль
+            self.db.add_shards(winner_id, SHARD_WIN_DUEL, f"duel_win:{duel['id']}")
+            self.db.add_shards(loser_id, SHARD_LOSS_MATCH, f"duel_loss:{duel['id']}")
+            self._dirty_economy.add(winner_id)
+            self._dirty_economy.add(loser_id)
+
+            # выплата ставок
+            self.db.resolve_bets(duel["id"], winner_id)
+
+            # проверка достижений
+            try:
+                await self.check_achievements(winner_id)
+                await self.check_achievements(loser_id)
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[ACHIEVEMENTS] ошибка проверки после дуэли: {e!r}")
 
         if not duel["duel_channel_id"]:
             return
@@ -2020,6 +3500,41 @@ class DotaStats(commands.Cog):
 
     @check_duel_expiry.before_loop
     async def before_duel_expiry(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- бэкап "грязных" данных в Discord-каналы ----------
+
+    @tasks.loop(minutes=BALANCE_BACKUP_INTERVAL_MINUTES)
+    async def backup_dirty_data(self):
+        for discord_id in list(self._dirty_economy):
+            self._dirty_economy.discard(discord_id)
+            try:
+                await self.backup_economy_to_channel(discord_id)
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[BACKUP] ошибка бэкапа экономики {discord_id}: {e!r}")
+            await asyncio.sleep(0.5)
+
+        for discord_id in list(self._dirty_achievements):
+            self._dirty_achievements.discard(discord_id)
+            try:
+                await self.backup_achievements_to_channel(discord_id)
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[BACKUP] ошибка бэкапа достижений {discord_id}: {e!r}")
+            await asyncio.sleep(0.5)
+
+        for tid in list(self._dirty_tournaments):
+            self._dirty_tournaments.discard(tid)
+            try:
+                await self.backup_tournament_to_channel(tid)
+            except Exception as e:
+                if DEBUG_LOG:
+                    print(f"[BACKUP] ошибка бэкапа турнира {tid}: {e!r}")
+            await asyncio.sleep(0.5)
+
+    @backup_dirty_data.before_loop
+    async def before_backup(self):
         await self.bot.wait_until_ready()
 
     async def _delete_managed_voice_channel(self, channel_id: int):
@@ -2208,6 +3723,227 @@ class DotaStats(commands.Cog):
                 await ctx.send(f"❌ Ошибка синхронизации: `{e}`")
                 return
         await ctx.send(f"✅ Синхронизировано {restored} привязок из канала-бэкапа в локальную SQLite.")
+
+    @commands.command(name="dota_backup_economy")
+    @commands.has_permissions(manage_channels=True)
+    async def backup_economy_cmd(self, ctx: commands.Context):
+        """Принудительно записать экономику в канал-бэкап."""
+        async with ctx.typing():
+            count = 0
+            try:
+                for p in self.db.all_players():
+                    did = p[0]
+                    if did:
+                        await self.backup_economy_to_channel(did)
+                        count += 1
+            except Exception as e:
+                await ctx.send(f"❌ Ошибка: `{e}`")
+                return
+        await ctx.send(f"✅ Записано {count} записей экономики в канал-бэкап.")
+
+    @commands.command(name="dota_backup_tournaments")
+    @commands.has_permissions(manage_channels=True)
+    async def backup_tournaments_cmd(self, ctx: commands.Context):
+        """Принудительно записать все турниры в канал-бэкап."""
+        async with ctx.typing():
+            count = 0
+            try:
+                for t in self.db.all_tournaments_by_status(["in_progress", "signup", "finished"]):
+                    await self.backup_tournament_to_channel(t["id"])
+                    count += 1
+            except Exception as e:
+                await ctx.send(f"❌ Ошибка: `{e}`")
+                return
+        await ctx.send(f"✅ Записано {count} турниров в канал-бэкап.")
+
+    # ==================== турнир ====================
+
+    @commands.command(name="tournament_create")
+    async def tournament_create(self, ctx: commands.Context, *, name: str = "Dota Cup"):
+        """Создать турнир. Формат: !tournament_create [имя] [--size=8|16]"""
+        max_players = 16
+        if "--size=8" in name:
+            max_players = 8
+            name = name.replace("--size=8", "").strip()
+        elif "--size=16" in name:
+            max_players = 16
+            name = name.replace("--size=16", "").strip()
+        active = self.db.get_active_tournament(ctx.guild.id)
+        if active:
+            await ctx.send(f"⚠️ Уже есть активный турнир: **{active['name']}** "
+                           f"(статус: {active['status']}). Дождитесь его завершения или отмены.")
+            return
+        tid = self.db.create_tournament(ctx.guild.id, name, ctx.author.id, max_players)
+        if not tid:
+            await ctx.send("Не удалось создать турнир.")
+            return
+        embed = discord.Embed(
+            title=f"🏆 Турнир: {name}",
+            description=f"Создал: {ctx.author.mention}\n"
+                        f"Максимум участников: **{max_players}**\n"
+                        f"Запись открыта! Нажмите кнопку ниже или `!tournament_join`.",
+            color=0x8B4513)
+        view = TournamentSignupView(self.db, tid)
+        msg = await ctx.send(embed=embed, view=view)
+        self._dirty_tournaments.add(tid)
+
+    @commands.command(name="tournament_join")
+    async def tournament_join(self, ctx: commands.Context):
+        """Записаться на активный турнир."""
+        t = self.db.get_active_tournament(ctx.guild.id)
+        if not t:
+            await ctx.send("Нет активного турнира. Создайте: `!tournament_create`")
+            return
+        if t["status"] != "signup":
+            await ctx.send("Запись на этот турнир закрыта.")
+            return
+        count = self.db.get_tournament_participant_count(t["id"])
+        if count >= t["max_players"]:
+            await ctx.send("Турнир заполнен.")
+            return
+        success = self.db.join_tournament(t["id"], ctx.author.id)
+        if not success:
+            await ctx.send("Вы уже записаны.")
+            return
+        count += 1
+        self._dirty_tournaments.add(t["id"])
+        await ctx.send(f"✅ Вы записаны на **{t['name']}**! ({count}/{t['max_players']})")
+
+    @commands.command(name="tournament_leave")
+    async def tournament_leave(self, ctx: commands.Context):
+        """Выйти из турнира (только во время записи)."""
+        t = self.db.get_active_tournament(ctx.guild.id)
+        if not t:
+            await ctx.send("Нет активного турнира.")
+            return
+        if t["status"] != "signup":
+            await ctx.send("Турнир уже начался — выйти нельзя.")
+            return
+        success = self.db.leave_tournament(t["id"], ctx.author.id)
+        if success:
+            self._dirty_tournaments.add(t["id"])
+            count = self.db.get_tournament_participant_count(t["id"])
+            await ctx.send(f"✅ Вы вышли из турнира. Осталось: {count}/{t['max_players']}")
+        else:
+            await ctx.send("Вы не записаны на этот турнир.")
+
+    @commands.command(name="tournament_start")
+    async def tournament_start(self, ctx: commands.Context):
+        """Начать турнир (создатель или админ). Случайный сидинг, создание сетки."""
+        t = self.db.get_active_tournament(ctx.guild.id)
+        if not t:
+            await ctx.send("Нет активного турнира.")
+            return
+        if t["status"] != "signup":
+            await ctx.send("Турнир уже начат.")
+            return
+        if t["creator_id"] != ctx.author.id and not ctx.author.guild_permissions.administrator:
+            await ctx.send("Только создатель турнира или администратор может начать.")
+            return
+        participants = self.db.get_tournament_participants(t["id"])
+        min_players = 4
+        if len(participants) < min_players:
+            await ctx.send(f"Нужно минимум {min_players} участников для старта.")
+            return
+        # округляем до ближайшей степени двойки
+        import math
+        bracket_size = 2 ** math.ceil(math.log2(len(participants)))
+        # рандомный сидинг
+        import random as _random
+        _random.shuffle(participants)
+        seeds = {p: i + 1 for i, p in enumerate(participants)}
+        self.db.set_tournament_seeds(t["id"], seeds)
+        self.db.set_tournament_status(t["id"], "in_progress")
+        # первый раунд: bracket_size / 2 матчей
+        num_matches = bracket_size // 2
+        for i in range(num_matches):
+            p1 = participants[i] if i < len(participants) else None
+            p2 = participants[bracket_size - 1 - i] if (bracket_size - 1 - i) < len(participants) else None
+            if p1 and p2:
+                self.db.create_tournament_match(t["id"], 1, i + 1, p1, p2)
+            elif p1:
+                # bye — автоматический проход
+                self.db.create_tournament_match(t["id"], 1, i + 1, p1, None)
+                self.db.conn.execute(
+                    "UPDATE tournament_matches SET winner_id=?, status='finished' "
+                    "WHERE tournament_id=? AND round=1 AND slot=? AND player2_id IS NULL",
+                    (p1, t["id"], i + 1))
+                self.db.conn.commit()
+        self.db.conn.commit()
+        self._dirty_tournaments.add(t["id"])
+        embed = TournamentBracketView(self.db, t["id"]).build_bracket_embed(ctx.guild)
+        await ctx.send(f"🏆 Турнир **{t['name']}** начинается!", embed=embed)
+        await self.try_advance_tournament(t["id"])
+
+    @commands.command(name="tournament_bracket")
+    async def tournament_bracket(self, ctx: commands.Context):
+        """Показать текущую сетку турнира."""
+        t = self.db.get_active_tournament(ctx.guild.id)
+        if not t:
+            await ctx.send("Нет активного турнира.")
+            return
+        view = TournamentBracketView(self.db, t["id"])
+        embed = view.build_bracket_embed(ctx.guild)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="tournament_cancel")
+    async def tournament_cancel(self, ctx: commands.Context):
+        """Отменить турнир (создатель или админ)."""
+        t = self.db.get_active_tournament(ctx.guild.id)
+        if not t:
+            await ctx.send("Нет активного турнира.")
+            return
+        if t["creator_id"] != ctx.author.id and not ctx.author.guild_permissions.administrator:
+            await ctx.send("Только создатель или администратор может отменить.")
+            return
+        self.db.set_tournament_status(t["id"], "cancelled")
+        self._dirty_tournaments.add(t["id"])
+        await ctx.send(f"❌ Турнир **{t['name']}** отменён.")
+
+    async def try_advance_tournament(self, tournament_id: int):
+        """Проверяет, завершены ли все матчи текущего раунда, и создаёт следующий."""
+        t = self.db.get_tournament(tournament_id)
+        if not t or t["status"] != "in_progress":
+            return
+        matches = self.db.get_tournament_matches(tournament_id)
+        if not matches:
+            return
+        max_round = max(m["round"] for m in matches)
+        current_round_matches = [m for m in matches if m["round"] == max_round]
+        unfinished = [m for m in current_round_matches if m["status"] != "finished"]
+        if unfinished:
+            return  # ещё не все матчи раунда завершены
+        winners = [m["winner_id"] for m in current_round_matches if m["winner_id"]]
+        if len(winners) == 1:
+            # финал завершён — объявляем победителя
+            self.db.set_tournament_winner(tournament_id, winners[0])
+            self.db.add_shards(winners[0], SHARD_TOURNAMENT_WIN, f"tournament_win:{tournament_id}")
+            self._dirty_tournaments.add(tournament_id)
+            self._dirty_economy.add(winners[0])
+            try:
+                await self.check_achievements(winners[0])
+            except Exception:
+                pass
+            return
+        if len(winners) < 2:
+            return
+        # создаём матчи следующего раунда
+        next_round = max_round + 1
+        for i in range(0, len(winners), 2):
+            p1 = winners[i]
+            p2 = winners[i + 1] if i + 1 < len(winners) else None
+            if p2:
+                self.db.create_tournament_match(tournament_id, next_round, i // 2 + 1, p1, p2)
+            else:
+                # bye
+                self.db.create_tournament_match(tournament_id, next_round, i // 2 + 1, p1, None)
+                self.db.conn.execute(
+                    "UPDATE tournament_matches SET winner_id=?, status='finished' "
+                    "WHERE tournament_id=? AND round=? AND slot=? AND player2_id IS NULL",
+                    (p1, tournament_id, next_round, i // 2 + 1))
+                self.db.conn.commit()
+        self.db.conn.commit()
+        self._dirty_tournaments.add(tournament_id)
 
 
 async def setup(bot: commands.Bot):
