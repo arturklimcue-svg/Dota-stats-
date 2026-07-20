@@ -325,6 +325,17 @@ class VerifyModal(discord.ui.Modal, title="Верификация — привя
 
         self.db.register(interaction.user.id, account_id, steam_id64)
 
+        # Дублируем привязку в приватный канал-бэкап (см. dota_stats_v3.py) —
+        # без этого вызова SteamID сохранялся только в SQLite и пропадал
+        # при редеплое без персистентного диска. Сбой бэкапа не должен
+        # мешать самой верификации/роли — поэтому исключение не поднимаем.
+        dota_cog = interaction.client.get_cog("DotaStats")
+        if dota_cog:
+            try:
+                await dota_cog.backup_player_to_channel(interaction.user.id, account_id, steam_id64)
+            except Exception as e:
+                print(f"[BACKUP] не удалось записать привязку {interaction.user.id} в канал-бэкап: {e!r}")
+
         member = interaction.user
         guild = interaction.guild
         unverified = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
