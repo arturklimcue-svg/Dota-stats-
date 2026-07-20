@@ -500,7 +500,11 @@ class Storage:
         # миграция для БД, созданных предыдущей версией (без last_match_id)
         try:
             c.execute("ALTER TABLE players ADD COLUMN last_match_id INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
+        except sqlite3.IntegrityError:
+            pass  # колонка уже есть
+        try:
+            c.execute("ALTER TABLE players ADD COLUMN dm_muted INTEGER DEFAULT 0")
+        except sqlite3.IntegrityError:
             pass  # колонка уже есть
 
         c.execute("""CREATE TABLE IF NOT EXISTS dashboard (
@@ -684,6 +688,16 @@ class Storage:
     def update_last_match(self, discord_id: int, match_id: int):
         self.conn.execute(
             "UPDATE players SET last_match_id=? WHERE discord_id=?", (match_id, discord_id))
+        self.conn.commit()
+
+    def get_dm_muted(self, discord_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT dm_muted FROM players WHERE discord_id=?", (discord_id,)).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_dm_muted(self, discord_id: int, muted: bool):
+        self.conn.execute(
+            "UPDATE players SET dm_muted=? WHERE discord_id=?", (int(muted), discord_id))
         self.conn.commit()
 
     def get_backup_message_id(self, discord_id: int):
@@ -2049,11 +2063,15 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.db = db
 
-    @discord.ui.button(label="Привязать SteamID", emoji="🔗", style=discord.ButtonStyle.primary, custom_id="dota:register")
+    # ---- row 0: Аккаунт ----
+
+    @discord.ui.button(label="Привязать SteamID", emoji="🔗", style=discord.ButtonStyle.primary,
+                        custom_id="dota:register", row=0)
     async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RegisterModal(self.db))
 
-    @discord.ui.button(label="Мой профиль", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="dota:profile")
+    @discord.ui.button(label="Профиль", emoji="📊", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:profile", row=0)
     async def profile_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         account_id = self.db.get_account_id(interaction.user.id)
         if not account_id:
@@ -2081,7 +2099,6 @@ class DashboardView(discord.ui.View):
             won = (last["player_slot"] < 128) == last["radiant_win"]
             embed.add_field(name="Последний матч",
                              value=f"{hero} — {'Победа' if won else 'Поражение'}", inline=False)
-        # shards + достижения
         balance = self.db.get_balance(interaction.user.id)
         embed.add_field(name="💎 Shards", value=str(balance), inline=True)
         achievements = self.db.get_achievements(interaction.user.id)
@@ -2090,95 +2107,17 @@ class DashboardView(discord.ui.View):
             emojis = " ".join(ACHIEVEMENTS.get(a, ("❓",))[0] for a in achievements if a in ACHIEVEMENTS)
             embed.add_field(name=f"🏅 Достижения ({len(achievements)}/{total_achievements})",
                              value=emojis or "пока нет", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Топ мета героев", emoji="🔥", style=discord.ButtonStyle.secondary, custom_id="dota:meta")
-    async def meta_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        stats = await od.hero_stats()
-
-        def picks(h): return sum(h.get(f"{i}_pick", 0) for i in range(1, 9))
-        def wins(h): return sum(h.get(f"{i}_win", 0) for i in range(1, 9))
-
-        ranked = sorted(stats, key=picks, reverse=True)[:10]
-        lines = []
-        for h in ranked:
-            pk, wn = picks(h), wins(h)
-            wr = f"{(wn / pk * 100):.1f}%" if pk else "N/A"
-            lines.append(f"**{h['localized_name']}** — WR {wr}, picks {pk}")
-        embed = discord.Embed(title="Топ-10 героев по пикрейту", description="\n".join(lines), color=0x8B4513)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Предметы под героя", emoji="🛒", style=discord.ButtonStyle.secondary, custom_id="dota:items_hero")
-    async def items_hero_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(HeroPickModal())
-
-    @discord.ui.button(label="Топ предметы (тренд)", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="dota:items_trend")
-    async def items_trend_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        trend = await od.item_trend()
-        lines = [f"**{name}** — {count} упоминаний в топ-билдах" for name, count in trend]
-        embed = discord.Embed(
-            title="Тренд предметов (по топ-15 популярных героев)",
-            description="\n".join(lines) or "Нет данных",
-            color=0x8B4513)
-        embed.set_footer(text="Оценка на основе популярных сборок, не точный глобальный винрейт")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Лидерборд недели", emoji="🏆", style=discord.ButtonStyle.success, custom_id="dota:leaderboard")
-    async def leaderboard_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
-        rows = await cog.compute_weekly_leaderboard(interaction.guild)
-        lines = [f"**{i}.** {name} — {games} игр, {wins}W, WR {wr:.1f}%"
-                 for i, (_, name, games, wins, wr) in enumerate(rows[:10], 1)]
-        embed = discord.Embed(
-            title=f"🏆 Лидерборд недели — {interaction.guild.name}",
-            description="\n".join(lines) or "Нет данных за последние 7 дней",
-            color=0x8B4513)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Топ дуэлянтов", emoji="🥊", style=discord.ButtonStyle.success, custom_id="dota:duel_top")
-    async def duel_top_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        rows = self.db.top_duelists(limit=10)
-        lines = []
-        for i, (discord_id, wins, losses) in enumerate(rows, 1):
-            member = interaction.guild.get_member(discord_id) if interaction.guild else None
-            name = member.display_name if member else f"<@{discord_id}>"
-            lines.append(f"**{i}.** {name} — {wins}W/{losses}L")
-        embed = discord.Embed(
-            title="🥊 Топ дуэлянтов",
-            description="\n".join(lines) or "Дуэлей ещё не было",
-            color=0x8B4513)
-        embed.set_footer(text="Дуэль недели: топ-1 против топ-2 еженедельного лидерборда")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Разбор последней игры", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="dota:last_review")
-    async def last_review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        account_id = self.db.get_account_id(interaction.user.id)
-        if not account_id:
-            await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-
-        recent = await od.get(f"/players/{account_id}/recentMatches")
-        if not recent:
-            await interaction.followup.send("Не нашёл матчей у вас в истории OpenDota.", ephemeral=True)
-            return
-
-        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
-        embed = await cog.build_match_review(interaction.user.id, account_id, recent[0]["match_id"])
-        if not embed:
-            await interaction.followup.send(
-                "Не получилось собрать разбор — матч мог быть без полной статистики "
-                "(например, ещё не распарсился в OpenDota). Попробуйте чуть позже.",
-                ephemeral=True)
-            return
+        hero_stats = await od.player_hero_stats(account_id, limit=100)
+        if hero_stats:
+            lines = []
+            for i, h in enumerate(hero_stats[:3], 1):
+                lines.append(f"**{i}. {h['hero_name']}** — {h['games']} игр, "
+                             f"{h['wins']}W ({h['wr']:.1f}%), KDA {h['avg_kda']}")
+            embed.add_field(name="🎭 Топ герои", value="\n".join(lines), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Shards", emoji="💎", style=discord.ButtonStyle.success,
-                        custom_id="dota:balance", row=2)
+                        custom_id="dota:balance", row=0)
     async def balance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog: "DotaStats" = interaction.client.get_cog("DotaStats")
         db = cog.db
@@ -2192,7 +2131,6 @@ class DashboardView(discord.ui.View):
                 sign = "+" if t["amount"] > 0 else ""
                 lines.append(f"{sign}{t['amount']} — {t['reason']}")
             embed.add_field(name="Последние транзакции", value="\n".join(lines), inline=False)
-        # проверка кулдауна ежедневного бонуса
         last_bonus = db.get_last_daily_bonus_time(interaction.user.id)
         can_claim = True
         if last_bonus:
@@ -2202,24 +2140,117 @@ class DashboardView(discord.ui.View):
         view = BalanceActionsView(db, can_claim)
         await interaction.response.send_message(embed=embed, ephemeral=True, view=view)
 
-    @discord.ui.button(label="Мои герои", emoji="🎭", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:heroes", row=2)
-    async def heroes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Уведомления", emoji="🔔", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:dm_toggle", row=0)
+    async def dm_toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        muted = self.db.get_dm_muted(interaction.user.id)
+        self.db.set_dm_muted(interaction.user.id, not muted)
+        new_state = not muted
+        status = "выключены 🔇" if new_state else "включены 🔔"
+        embed = discord.Embed(
+            title="Настройки уведомлений",
+            description=f"Рассылки бота (матч-ревью) теперь **{status}**.",
+            color=0x8B4513)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ---- row 1: Соревнования ----
+
+    @discord.ui.button(label="Лидерборд", emoji="🏆", style=discord.ButtonStyle.success,
+                        custom_id="dota:leaderboard", row=1)
+    async def leaderboard_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        rows = await cog.compute_weekly_leaderboard(interaction.guild)
+        lines = [f"**{i}.** {name} — {games} игр, {wins}W, WR {wr:.1f}%"
+                 for i, (_, name, games, wins, wr) in enumerate(rows[:10], 1)]
+        embed = discord.Embed(
+            title=f"🏆 Лидерборд — {interaction.guild.name}",
+            description="\n".join(lines) or "Нет данных за последние 7 дней",
+            color=0x8B4513)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Дуэли", emoji="🥊", style=discord.ButtonStyle.success,
+                        custom_id="dota:duel_top", row=1)
+    async def duel_top_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        rows = self.db.top_duelists(limit=10)
+        lines = []
+        for i, (discord_id, wins, losses) in enumerate(rows, 1):
+            member = interaction.guild.get_member(discord_id) if interaction.guild else None
+            name = member.display_name if member else f"<@{discord_id}>"
+            lines.append(f"**{i}.** {name} — {wins}W/{losses}L")
+        embed = discord.Embed(
+            title="🥊 Топ дуэлянтов",
+            description="\n".join(lines) or "Дуэлей ещё не было",
+            color=0x8B4513)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Турнир", emoji="⚔️", style=discord.ButtonStyle.success,
+                        custom_id="dota:tournament", row=1)
+    async def tournament_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = self.db.get_active_tournament(interaction.guild.id)
+        embed = discord.Embed(title="🏆 Турнир", color=0x8B4513)
+        if t:
+            participants = self.db.get_tournament_participant_count(t["id"])
+            embed.description = (
+                f"**{t['name']}**\n"
+                f"Статус: `{t['status']}`\n"
+                f"Участников: {participants}/{t['max_players']}"
+            )
+            if t["status"] == "in_progress":
+                matches = self.db.get_tournament_matches(t["id"])
+                unfinished = [m for m in matches if m["status"] != "finished"]
+                embed.add_field(name="Матчи", value=f"Осталось: {len(unfinished)}", inline=True)
+                embed.add_field(name="Раунд", value=f"Текущий: {max((m['round'] for m in matches), default=1)}", inline=True)
+            elif t["winner_id"]:
+                member = interaction.guild.get_member(t["winner_id"])
+                name = member.display_name if member else f"<@{t['winner_id']}>"
+                embed.add_field(name="Победитель", value=name, inline=False)
+        else:
+            embed.description = "Активного турнира нет. Создайте новый!"
+        view = TournamentHubView(self.db, interaction.guild.id)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Разбор игры", emoji="📋", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:last_review", row=1)
+    async def last_review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         account_id = self.db.get_account_id(interaction.user.id)
         if not account_id:
             await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        hero_stats = await od.player_hero_stats(account_id, limit=100)
-        if not hero_stats:
-            await interaction.followup.send("Нет данных по матчам.", ephemeral=True)
+        recent = await od.get(f"/players/{account_id}/recentMatches")
+        if not recent:
+            await interaction.followup.send("Не нашёл матчей в истории OpenDota.", ephemeral=True)
             return
-        embed = discord.Embed(title="🎭 Ваши герои (последние 100 матчей)", color=0x8B4513)
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        embed = await cog.build_match_review(interaction.user.id, account_id, recent[0]["match_id"])
+        if not embed:
+            await interaction.followup.send(
+                "Не получилось собрать разбор. Попробуйте позже.", ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ---- row 2: Стратегия и аналитика ----
+
+    @discord.ui.button(label="Мета героев", emoji="🔥", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:meta", row=2)
+    async def meta_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        def picks(h): return sum(h.get(f"{i}_pick", 0) for i in range(1, 9))
+        def wins(h): return sum(h.get(f"{i}_win", 0) for i in range(1, 9))
+        ranked = sorted(stats, key=picks, reverse=True)[:10]
         lines = []
-        for i, h in enumerate(hero_stats[:5], 1):
-            lines.append(f"**{i}. {h['hero_name']}** — {h['games']} игр, "
-                         f"{h['wins']}W ({h['wr']:.1f}%), KDA {h['avg_kda']}")
-        embed.description = "\n".join(lines)
+        for h in ranked:
+            pk, wn = picks(h), wins(h)
+            wr = f"{(wn / pk * 100):.1f}%" if pk else "N/A"
+            lines.append(f"**{h['localized_name']}** — WR {wr}, picks {pk}")
+        embed = discord.Embed(title="🔥 Топ-10 героев по пикрейту", description="\n".join(lines), color=0x8B4513)
+        trend = await od.item_trend()
+        if trend:
+            item_lines = [f"**{name}** — {count}" for name, count in trend[:5]]
+            embed.add_field(name="📦 Топ предметы", value="\n".join(item_lines), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Контр-пики", emoji="🛡", style=discord.ButtonStyle.secondary,
@@ -2227,7 +2258,7 @@ class DashboardView(discord.ui.View):
     async def counterpick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CounterPickModal())
 
-    @discord.ui.button(label="Сравнить игроков", emoji="⚔️", style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label="Сравнить", emoji="⚔️", style=discord.ButtonStyle.secondary,
                         custom_id="dota:compare", row=2)
     async def compare_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CompareModal(self.db))
@@ -2292,6 +2323,145 @@ class ShopBuyView(discord.ui.View):
                         custom_id="dota:shop_buy")
     async def buy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ShopModal(self.db))
+
+
+class TournamentHubView(discord.ui.View):
+    def __init__(self, db: Storage, guild_id: int):
+        super().__init__(timeout=60)
+        self.db = db
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Создать турнир", emoji="🆕", style=discord.ButtonStyle.success)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TournamentCreateModal(self.db))
+
+    @discord.ui.button(label="Записаться", emoji="🎯", style=discord.ButtonStyle.primary)
+    async def join_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        t = self.db.get_active_tournament(self.guild_id)
+        if not t:
+            await interaction.response.send_message("Нет активного турнира. Сначала создайте.", ephemeral=True)
+            return
+        if t["status"] != "signup":
+            await interaction.response.send_message("Запись закрыта.", ephemeral=True)
+            return
+        count = self.db.get_tournament_participant_count(t["id"])
+        if count >= t["max_players"]:
+            await interaction.response.send_message("Турнир заполнен.", ephemeral=True)
+            return
+        success = self.db.join_tournament(t["id"], interaction.user.id)
+        if not success:
+            await interaction.response.send_message("Вы уже записаны.", ephemeral=True)
+            return
+        self.db.conn.commit()
+        cog._dirty_tournaments.add(t["id"])
+        new_count = self.db.get_tournament_participant_count(t["id"])
+        await interaction.response.send_message(
+            f"✅ Записаны на **{t['name']}**! ({new_count}/{t['max_players']})", ephemeral=True)
+
+    @discord.ui.button(label="Выйти", emoji="🚪", style=discord.ButtonStyle.danger)
+    async def leave_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = self.db.get_active_tournament(self.guild_id)
+        if not t or t["status"] != "signup":
+            await interaction.response.send_message("Нельзя выйти.", ephemeral=True)
+            return
+        success = self.db.leave_tournament(t["id"], interaction.user.id)
+        if success:
+            self.db.conn.commit()
+            count = self.db.get_tournament_participant_count(t["id"])
+            await interaction.response.send_message(f"✅ Вы вышли. Осталось: {count}/{t['max_players']}", ephemeral=True)
+        else:
+            await interaction.response.send_message("Вы не записаны.", ephemeral=True)
+
+    @discord.ui.button(label="Сетка", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def bracket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = self.db.get_active_tournament(self.guild_id)
+        if not t:
+            await interaction.response.send_message("Нет активного турнира.", ephemeral=True)
+            return
+        view = TournamentBracketView(self.db, t["id"])
+        embed = view.build_bracket_embed(interaction.guild)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Начать турнир", emoji="▶️", style=discord.ButtonStyle.success, row=1)
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        t = self.db.get_active_tournament(self.guild_id)
+        if not t:
+            await interaction.response.send_message("Нет активного турнира.", ephemeral=True)
+            return
+        if t["status"] != "signup":
+            await interaction.response.send_message("Турнир уже начат.", ephemeral=True)
+            return
+        if t["creator_id"] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Только создатель или админ.", ephemeral=True)
+            return
+        participants = self.db.get_tournament_participants(t["id"])
+        if len(participants) < 4:
+            await interaction.response.send_message("Нужно минимум 4 участника.", ephemeral=True)
+            return
+        import math
+        import random as _random
+        bracket_size = 2 ** math.ceil(math.log2(len(participants)))
+        _random.shuffle(participants)
+        seeds = {p: i + 1 for i, p in enumerate(participants)}
+        self.db.set_tournament_seeds(t["id"], seeds)
+        self.db.set_tournament_status(t["id"], "in_progress")
+        num_matches = bracket_size // 2
+        for i in range(num_matches):
+            p1 = participants[i] if i < len(participants) else None
+            p2 = participants[bracket_size - 1 - i] if (bracket_size - 1 - i) < len(participants) else None
+            if p1 and p2:
+                self.db.create_tournament_match(t["id"], 1, i + 1, p1, p2)
+            elif p1:
+                self.db.create_tournament_match(t["id"], 1, i + 1, p1, None)
+                self.db.conn.execute(
+                    "UPDATE tournament_matches SET winner_id=?, status='finished' "
+                    "WHERE tournament_id=? AND round=1 AND slot=? AND player2_id IS NULL",
+                    (p1, t["id"], i + 1))
+                self.db.conn.commit()
+        self.db.conn.commit()
+        cog._dirty_tournaments.add(t["id"])
+        embed = TournamentBracketView(self.db, t["id"]).build_bracket_embed(interaction.guild)
+        await interaction.response.send_message(f"🏆 Турнир **{t['name']}** начинается!", embed=embed)
+        await cog.try_advance_tournament(t["id"])
+
+
+class TournamentCreateModal(discord.ui.Modal, title="Новый турнир"):
+    name = discord.ui.TextInput(label="Название турнира", placeholder="напр. Dota Cup", max_length=50)
+    size = discord.ui.TextInput(label="Макс. участников (8 или 16)", placeholder="16", max_length=2, default="16")
+
+    def __init__(self, db: Storage):
+        super().__init__()
+        self.db = db
+
+    async def on_submit(self, interaction: discord.Interaction):
+        max_p = 16
+        try:
+            max_p = int(str(self.size.value))
+            if max_p not in (8, 16):
+                max_p = 16
+        except ValueError:
+            max_p = 16
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        t = self.db.get_active_tournament(interaction.guild.id)
+        if t:
+            await interaction.response.send_message(
+                f"Уже есть активный турнир: **{t['name']}** ({t['status']}).", ephemeral=True)
+            return
+        tid = self.db.create_tournament(interaction.guild.id, str(self.name.value), interaction.user.id, max_p)
+        if not tid:
+            await interaction.response.send_message("Не удалось создать.", ephemeral=True)
+            return
+        cog._dirty_tournaments.add(tid)
+        embed = discord.Embed(
+            title=f"🏆 Турнир: {self.name.value}",
+            description=f"Создал: {interaction.user.mention}\n"
+                        f"Максимум: **{max_p}** участников\n"
+                        f"Запись открыта!",
+            color=0x8B4513)
+        view = TournamentSignupView(self.db, tid)
+        await interaction.response.send_message(embed=embed, view=view)
 
 
 # ---------------- дуэль лидеров недели: views ----------------
@@ -3208,18 +3378,22 @@ class DotaStats(commands.Cog):
             new_bal = self.db.add_shards(discord_id, SHARD_LOSS_MATCH, f"match_loss:{match_id}")
         self._dirty_economy.add(discord_id)
 
-        user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
-        try:
-            await user.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException):
-            for guild_id, channel_id, _ in self.db.all_dashboards():
-                guild = self.bot.get_guild(guild_id)
-                if not guild or not guild.get_member(discord_id):
-                    continue
-                channel = guild.get_channel(channel_id)
-                if channel:
-                    await channel.send(content=f"<@{discord_id}>", embed=embed)
-                break
+        if self.db.get_dm_muted(discord_id):
+            if DEBUG_LOG:
+                print(f"[MATCH REVIEW] DM muted для {discord_id}, пропускаю отправку")
+        else:
+            user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
+            try:
+                await user.send(embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                for guild_id, channel_id, _ in self.db.all_dashboards():
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild or not guild.get_member(discord_id):
+                        continue
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        await channel.send(content=f"<@{discord_id}>", embed=embed)
+                    break
 
         # проверка достижений после матча
         try:
