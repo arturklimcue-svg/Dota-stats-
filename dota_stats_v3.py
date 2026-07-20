@@ -44,16 +44,25 @@ Dota статистика v4 — без слэш-команд, всё через
          голосового канала выходит последний человек, бот удаляет канал
          сам. Это касается ЛЮБЫХ голосовых каналов сервера (включая уже
          существующие, не только созданные ботом для дуэлей), КРОМЕ:
-           - каналов/категорий из списка исключений (например, поранговые
-             комнаты) — управляется командами !dota_voice_protect /
-             !dota_voice_unprotect / !dota_voice_protected_list;
+           - каналов/категорий из списка исключений в БД — управляется
+             командами !dota_voice_protect / !dota_voice_unprotect /
+             !dota_voice_protected_list (удобно для ваших собственных
+             "статичных" каналов — общий холл и т.п.);
+           - "постоянных" каналов/категорий самого бота — поранговых комнат
+             (🐎/🛡/👑), 📊 Статистика сервера и ➕ Создать войс — они
+             защищены ЖЁСТКО В КОДЕ по названию (см.
+             ALWAYS_PROTECTED_VOICE_CATEGORY_NAMES /
+             ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES выше), а не только через
+             БД — поэтому не "слетают" при сбросе/потере базы (например,
+             редеплой без персистентного диска) и не требуют команды
+             !dota_voice_protect после каждой настройки сервера;
            - системного AFK-канала сервера, если он настроен.
          Голосовой канал дуэли (см. пункт 6) регистрируется в этом же
          механизме автоматически — отдельно защищать не нужно.
-         ⚠️ Учтите: включив это на сервере с уже настроенными голосовыми
-         комнатами, сразу защитите постоянные "статичные" каналы (общий
-         холл, AFK и т.п.) командой !dota_voice_protect — иначе они
-         удалятся при первом же опустении.
+         ⚠️ Учтите: включив это на сервере с уже настроенными ДРУГИМИ
+         голосовыми комнатами (не из списка выше), сразу защитите их
+         командой !dota_voice_protect — иначе они удалятся при первом же
+         опустении.
 
 Кнопки на панели:
   🔗 Привязать SteamID     -> модалка с вводом SteamID
@@ -163,6 +172,27 @@ def _resolve_backup_channel_id() -> int:
 
 
 PLAYER_BACKUP_CHANNEL_ID = _resolve_backup_channel_id()
+
+
+# ---------------- голосовые каналы/категории, защищённые от автоудаления ----------------
+# Раньше защита жила ТОЛЬКО в SQLite (voice_protected, через !dota_voice_protect) —
+# из-за этого она "слетала" при любом сбросе базы (редеплой без персистентного
+# диска, смена хостинга, ручное удаление файла и т.п., см. _resolve_db_path выше).
+# Эти каналы/категории — часть постоянной структуры сервера (создаются в
+# server_management.py), поэтому они защищены прямо в коде и НЕ зависят от
+# содержимого БД. Совпадение — по названию категории/канала, а не по ID: так
+# защита переживает даже пересоздание категории/канала (новый ID).
+# ВАЖНО: если переименуете эти категории/каналы в server_management.py
+# (RANK_GROUPS / STATS_CATEGORY / JOIN_TO_CREATE_CHANNEL), обновите и здесь.
+ALWAYS_PROTECTED_VOICE_CATEGORY_NAMES = {
+    "🐎 Herald – Crusader",
+    "🛡 Archon – Legend",
+    "👑 Ancient – Immortal",
+    "📊 Статистика сервера",
+}
+ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES = {
+    "➕ Создать войс",
+}
 
 # Маркер в начале сообщения-бэкапа — по нему бот отличает "свои" служебные
 # сообщения от любых других (например, если админ что-то написал в тот же
@@ -2013,8 +2043,12 @@ class DotaStats(commands.Cog):
 
         Не трогает:
           - каналы/категории из списка исключений (voice_protected) —
-            например, поранговые комнаты; управляется командами
-            !dota_voice_protect / !dota_voice_unprotect / !dota_voice_protected_list;
+            управляется командами !dota_voice_protect / !dota_voice_unprotect /
+            !dota_voice_protected_list;
+          - "постоянные" каналы/категории сервера — поранговые комнаты,
+            📊 Статистика сервера, ➕ Создать войс — они защищены жёстко в
+            коде по названию (см. ALWAYS_PROTECTED_VOICE_* выше) и не зависят
+            от БД, поэтому не "слетают" при сбросе/потере базы;
           - системный AFK-канал сервера (Server Settings -> Overview -> Afk channel),
             если он настроен — его удаление сломало бы настройки сервера.
         """
@@ -2037,7 +2071,11 @@ class DotaStats(commands.Cog):
         if guild.afk_channel and refreshed.id == guild.afk_channel.id:
             return
         category_id = refreshed.category_id
-        if self.db.is_voice_protected(refreshed.id, category_id, guild.id):
+        category_name = refreshed.category.name if refreshed.category else None
+        if (self.db.is_voice_protected(refreshed.id, category_id, guild.id)
+                or refreshed.name in ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES
+                or (category_name is not None
+                    and category_name in ALWAYS_PROTECTED_VOICE_CATEGORY_NAMES)):
             return
 
         try:
