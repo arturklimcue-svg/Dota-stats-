@@ -865,6 +865,74 @@ class ServerManagement(commands.Cog):
         if chunk:
             await ctx.send(chunk)
 
+    # ---------- ручная привязка SteamID администратором ----------
+
+    @commands.command(name="dota_link_player")
+    @commands.has_permissions(manage_roles=True)
+    async def link_player(self, ctx: commands.Context, member: discord.Member, *, raw_steam_id: str):
+        """Привязывает SteamID к участнику от лица администратора — тот же
+        результат, что и обычная верификация (роль по рангу, приветствие
+        в WELCOME_CHANNEL, запись в канал-бэкап), но без участия самого
+        игрока. Полезно, когда SteamID уже известен заранее.
+        Использование: !dota_link_player @Игрок 76561198012345678"""
+        try:
+            account_id = to_account_id(raw_steam_id.strip())
+            steam_id64 = to_steam64(raw_steam_id.strip())
+        except ValueError:
+            await ctx.send("Это не похоже на SteamID (ни 64-битный, ни account_id).")
+            return
+
+        async with ctx.typing():
+            profile = await od.get(f"/players/{account_id}")
+        if not profile or not profile.get("profile"):
+            await ctx.send("Не нашёл такой SteamID в OpenDota. Профиль должен быть публичным.")
+            return
+
+        self.db.register(member.id, account_id, steam_id64)
+
+        # Дублируем привязку в приватный канал-бэкап (см. dota_stats_v3.py),
+        # как и при обычной верификации через VerifyModal.
+        dota_cog = self.bot.get_cog("DotaStats")
+        if dota_cog:
+            try:
+                await dota_cog.backup_player_to_channel(member.id, account_id, steam_id64)
+            except Exception as e:
+                print(f"[BACKUP] не удалось записать привязку {member.id} в канал-бэкап: {e!r}")
+
+        guild = ctx.guild
+        unverified = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+        verified = await get_or_create_role(guild, VERIFIED_ROLE)
+        try:
+            if unverified and unverified in member.roles:
+                await member.remove_roles(unverified, reason="Верификация выполнена администратором")
+            await member.add_roles(verified, reason="Верификация выполнена администратором")
+            rank_role_name = await assign_rank_role(member, account_id)
+        except discord.Forbidden:
+            await ctx.send(
+                "SteamID сохранил, но не смог выдать роль — у бота не хватает прав "
+                "(Manage Roles) или его роль стоит ниже роли Verified/ранговых в "
+                "иерархии сервера (Server Settings -> Roles).")
+            return
+
+        persona = profile["profile"].get("personaname", "игрок")
+        note = ""
+        if rank_role_name == UNRANKED_ROLE:
+            note = ("\n\n(Ранг не определился — либо матчи скрыты в настройках приватности "
+                    "Steam/Dota, либо статистика ещё не синхронизировалась. Роль обновится "
+                    "автоматически при следующей синхронизации.)")
+        await ctx.send(
+            f"Готово: привязал {member.mention} к **{persona}**, выдал роль **{rank_role_name}**.{note}")
+
+        welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
+        if welcome_ch:
+            welcome_embed = discord.Embed(
+                description=f"🎉 {member.mention} присоединился к серверу как **{rank_role_name}**! "
+                            f"Добро пожаловать в бой.",
+                color=0x8B4513)
+            if profile["profile"].get("avatarfull"):
+                welcome_embed.set_thumbnail(url=profile["profile"]["avatarfull"])
+            await welcome_ch.send(embed=welcome_embed)
+
     # ---------- разовая настройка сервера ----------
 
     @commands.command(name="dota_server_setup")
