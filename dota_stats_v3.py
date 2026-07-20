@@ -2056,22 +2056,35 @@ class CompareModal(discord.ui.Modal, title="Сравнить двух игрок
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# ---------------- persistent dashboard view ----------------
+# ---------------- persistent views — по каналам ----------------
 
-class DashboardView(discord.ui.View):
+REGISTER_CHANNEL = "🔐-ВЕРИФИКАЦИЯ"
+WELCOME_CHANNEL = "👋-приветствия"
+LEADERBOARD_CHANNEL_DASH = "🏆-лидерборд"
+STRATEGY_CHANNEL = "🧠-советы-и-стратегии"
+SHOP_CHANNEL = "🛒-магазин"
+
+
+class RegisterView(discord.ui.View):
+    """Кнопка привязки SteamID — в канале верификации."""
     def __init__(self, db: Storage):
         super().__init__(timeout=None)
         self.db = db
 
-    # ---- row 0: Аккаунт ----
-
-    @discord.ui.button(label="Привязать SteamID", emoji="🔗", style=discord.ButtonStyle.primary,
-                        custom_id="dota:register", row=0)
+    @discord.ui.button(label="Привязать SteamID", emoji="🔗",
+                        style=discord.ButtonStyle.primary, custom_id="dota:register")
     async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RegisterModal(self.db))
 
+
+class ProfileView(discord.ui.View):
+    """Профиль + уведомления — в канале приветствий."""
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
     @discord.ui.button(label="Профиль", emoji="📊", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:profile", row=0)
+                        custom_id="dota:profile")
     async def profile_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         account_id = self.db.get_account_id(interaction.user.id)
         if not account_id:
@@ -2092,7 +2105,7 @@ class DashboardView(discord.ui.View):
         embed.add_field(name="Winrate", value=f"{wr} ({wins}W/{loses}L)")
         duel_wins, duel_losses = self.db.get_duel_stats(interaction.user.id)
         if duel_wins + duel_losses > 0:
-            embed.add_field(name="🥊 Дуэли лидеров", value=f"{duel_wins}W / {duel_losses}L")
+            embed.add_field(name="🥊 Дуэли", value=f"{duel_wins}W / {duel_losses}L")
         if recent:
             last = recent[0]
             hero = await od.hero_name(last["hero_id"])
@@ -2116,47 +2129,27 @@ class DashboardView(discord.ui.View):
             embed.add_field(name="🎭 Топ герои", value="\n".join(lines), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Shards", emoji="💎", style=discord.ButtonStyle.success,
-                        custom_id="dota:balance", row=0)
-    async def balance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
-        db = cog.db
-        balance = db.get_balance(interaction.user.id)
-        history = db.get_transaction_history(interaction.user.id, limit=5)
-        embed = discord.Embed(title="💎 Shards", color=0x8B4513)
-        embed.add_field(name="Баланс", value=f"**{balance}** shards", inline=True)
-        if history:
-            lines = []
-            for t in history:
-                sign = "+" if t["amount"] > 0 else ""
-                lines.append(f"{sign}{t['amount']} — {t['reason']}")
-            embed.add_field(name="Последние транзакции", value="\n".join(lines), inline=False)
-        last_bonus = db.get_last_daily_bonus_time(interaction.user.id)
-        can_claim = True
-        if last_bonus:
-            last_dt = datetime.fromisoformat(last_bonus)
-            if datetime.now(timezone.utc) - last_dt < timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS):
-                can_claim = False
-        view = BalanceActionsView(db, can_claim)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=view)
-
     @discord.ui.button(label="Уведомления", emoji="🔔", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:dm_toggle", row=0)
+                        custom_id="dota:dm_toggle")
     async def dm_toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         muted = self.db.get_dm_muted(interaction.user.id)
         self.db.set_dm_muted(interaction.user.id, not muted)
-        new_state = not muted
-        status = "выключены 🔇" if new_state else "включены 🔔"
+        status = "выключены 🔇" if not muted else "включены 🔔"
         embed = discord.Embed(
             title="Настройки уведомлений",
             description=f"Рассылки бота (матч-ревью) теперь **{status}**.",
             color=0x8B4513)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ---- row 1: Соревнования ----
+
+class CompetitionView(discord.ui.View):
+    """Лидерборд + дуэли + турнир — в канале лидерборда."""
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
 
     @discord.ui.button(label="Лидерборд", emoji="🏆", style=discord.ButtonStyle.success,
-                        custom_id="dota:leaderboard", row=1)
+                        custom_id="dota:leaderboard")
     async def leaderboard_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         cog: "DotaStats" = interaction.client.get_cog("DotaStats")
@@ -2170,7 +2163,7 @@ class DashboardView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Дуэли", emoji="🥊", style=discord.ButtonStyle.success,
-                        custom_id="dota:duel_top", row=1)
+                        custom_id="dota:duel_top")
     async def duel_top_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         rows = self.db.top_duelists(limit=10)
@@ -2186,7 +2179,7 @@ class DashboardView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Турнир", emoji="⚔️", style=discord.ButtonStyle.success,
-                        custom_id="dota:tournament", row=1)
+                        custom_id="dota:tournament")
     async def tournament_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         t = self.db.get_active_tournament(interaction.guild.id)
         embed = discord.Embed(title="🏆 Турнир", color=0x8B4513)
@@ -2211,30 +2204,15 @@ class DashboardView(discord.ui.View):
         view = TournamentHubView(self.db, interaction.guild.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @discord.ui.button(label="Разбор игры", emoji="📋", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:last_review", row=1)
-    async def last_review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        account_id = self.db.get_account_id(interaction.user.id)
-        if not account_id:
-            await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        recent = await od.get(f"/players/{account_id}/recentMatches")
-        if not recent:
-            await interaction.followup.send("Не нашёл матчей в истории OpenDota.", ephemeral=True)
-            return
-        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
-        embed = await cog.build_match_review(interaction.user.id, account_id, recent[0]["match_id"])
-        if not embed:
-            await interaction.followup.send(
-                "Не получилось собрать разбор. Попробуйте позже.", ephemeral=True)
-            return
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ---- row 2: Стратегия и аналитика ----
+class StrategyView(discord.ui.View):
+    """Мета + контр-пики + сравнение + разбор — в канале стратегии."""
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
 
     @discord.ui.button(label="Мета героев", emoji="🔥", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:meta", row=2)
+                        custom_id="dota:meta")
     async def meta_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         stats = await od.hero_stats()
@@ -2254,14 +2232,83 @@ class DashboardView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Контр-пики", emoji="🛡", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:counterpick", row=2)
+                        custom_id="dota:counterpick")
     async def counterpick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CounterPickModal())
 
     @discord.ui.button(label="Сравнить", emoji="⚔️", style=discord.ButtonStyle.secondary,
-                        custom_id="dota:compare", row=2)
+                        custom_id="dota:compare")
     async def compare_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CompareModal(self.db))
+
+    @discord.ui.button(label="Разбор игры", emoji="📋", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:last_review")
+    async def last_review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        account_id = self.db.get_account_id(interaction.user.id)
+        if not account_id:
+            await interaction.response.send_message("Сначала привяжите SteamID.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        recent = await od.get(f"/players/{account_id}/recentMatches")
+        if not recent:
+            await interaction.followup.send("Не нашёл матчей в истории OpenDota.", ephemeral=True)
+            return
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        embed = await cog.build_match_review(interaction.user.id, account_id, recent[0]["match_id"])
+        if not embed:
+            await interaction.followup.send(
+                "Не получилось собрать разбор. Попробуйте позже.", ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class ShopView(discord.ui.View):
+    """Shards + бонус + магазин — в канале магазина."""
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Shards", emoji="💎", style=discord.ButtonStyle.success,
+                        custom_id="dota:balance")
+    async def balance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        db = cog.db
+        balance = db.get_balance(interaction.user.id)
+        history = db.get_transaction_history(interaction.user.id, limit=5)
+        embed = discord.Embed(title="💎 Shards", color=0x8B4513)
+        embed.add_field(name="Баланс", value=f"**{balance}** shards", inline=True)
+        if history:
+            lines = []
+            for t in history:
+                sign = "+" if t["amount"] > 0 else ""
+                lines.append(f"{sign}{t['amount']} — {t['reason']}")
+            embed.add_field(name="История", value="\n".join(lines), inline=False)
+        last_bonus = db.get_last_daily_bonus_time(interaction.user.id)
+        can_claim = True
+        if last_bonus:
+            last_dt = datetime.fromisoformat(last_bonus)
+            if datetime.now(timezone.utc) - last_dt < timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS):
+                can_claim = False
+        view = BalanceActionsView(db, can_claim)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=view)
+
+    @discord.ui.button(label="Магазин", emoji="🛒", style=discord.ButtonStyle.primary,
+                        custom_id="dota:shop_hub")
+    async def shop_hub_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "DotaStats" = interaction.client.get_cog("DotaStats")
+        db = cog.db
+        items = db.get_shop_items()
+        balance = db.get_balance(interaction.user.id)
+        embed = discord.Embed(title="🛒 Магазин", color=0x8B4513)
+        embed.set_footer(text=f"Ваш баланс: {balance} shards")
+        lines = []
+        for item in items:
+            can_buy = "✅" if balance >= item["cost"] else "❌"
+            lines.append(f"{can_buy} **{item['id']}.** {item['emoji'] or ''} {item['name']} "
+                         f"— {item['cost']} shards\n   {item['description']}")
+        embed.description = "\n".join(lines)
+        embed.add_field(name="Как купить", value="Введите ID товара в модалке ниже", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(db))
 
 
 class BalanceActionsView(discord.ui.View):
@@ -2795,7 +2842,11 @@ class DotaStats(commands.Cog):
         self.backup_dirty_data.cancel()
 
     async def cog_load(self):
-        self.bot.add_view(DashboardView(self.db))
+        self.bot.add_view(RegisterView(self.db))
+        self.bot.add_view(ProfileView(self.db))
+        self.bot.add_view(CompetitionView(self.db))
+        self.bot.add_view(StrategyView(self.db))
+        self.bot.add_view(ShopView(self.db))
         # переподключаем кнопки активных дуэлей после рестарта бота —
         # custom_id зашит в duel_id, поэтому старые сообщения снова оживают
         for duel in self.db.duels_by_status(["pending"]):
@@ -2862,26 +2913,26 @@ class DotaStats(commands.Cog):
         await match_reviewer.self_test()
 
     async def _refresh_dashboard_panels_on_start(self):
-        embed = discord.Embed(
-            title="🎮 Dota Stats",
-            description="Нажмите кнопку ниже, чтобы получить свою статистику. "
-                        "Ответы видны только вам.",
-            color=0x8B4513,
-        )
+        """Обновляет старые панели DashboardView (если есть) —
+        заменяет на CompetitionView для совместимости."""
         for guild_id, channel_id, message_id in self.db.all_dashboards():
             channel = self.bot.get_channel(channel_id)
             if not channel:
                 continue
             try:
                 msg = await channel.fetch_message(message_id)
-                await msg.edit(embed=embed, view=DashboardView(self.db))
+                embed = discord.Embed(
+                    title="🏆 Соревнования",
+                    description="Лидерборд, дуэли и турниры — нажмите кнопку ниже.",
+                    color=0x8B4513)
+                await msg.edit(embed=embed, view=CompetitionView(self.db))
                 if DEBUG_LOG:
-                    print(f"[DASHBOARD] панель в канале {channel_id} обновлена текущим набором кнопок")
+                    print(f"[DASHBOARD] старая панель в {channel_id} обновлена → CompetitionView")
             except discord.NotFound:
-                pass  # сообщение удалили руками — дождёмся ручного !dota_setup
+                pass
             except discord.Forbidden:
                 if DEBUG_LOG:
-                    print(f"[DASHBOARD] нет прав редактировать панель в канале {channel_id}")
+                    print(f"[DASHBOARD] нет прав редактировать панель в {channel_id}")
 
     # ---------- бэкап привязок discord_id <-> SteamID в приватный канал ----------
     #
@@ -3826,20 +3877,52 @@ class DotaStats(commands.Cog):
     @commands.command(name="dota_setup")
     @commands.has_permissions(manage_channels=True)
     async def setup_panel(self, ctx: commands.Context):
-        """Разово ставит/обновляет панель с кнопками в текущем канале."""
-        embed = discord.Embed(
-            title="🎮 Dota Stats",
-            description="Нажмите кнопку ниже, чтобы получить свою статистику. "
-                        "Ответы видны только вам.",
-            color=0x8B4513,
-        )
-        view = DashboardView(self.db)
-        msg = await ctx.send(embed=embed, view=view)
-        self.db.set_dashboard(ctx.guild.id, ctx.channel.id, msg.id)
-        try:
-            await msg.pin()
-        except discord.Forbidden:
-            pass
+        """Расставляет виджеты по каналам автоматически по названиям:
+        🔐-ВЕРИФИКАЦИЯ → RegisterView, 👋-приветствия → ProfileView,
+        🏆-лидерборд → CompetitionView, 🧠-советы-и-стратегии → StrategyView,
+        🛒-магазин → ShopView."""
+        views_map = {
+            "🔐-ВЕРИФИКАЦИЯ": ("🔗 Верификация",
+                "Привяжите SteamID, чтобы получить доступ к серверу.",
+                RegisterView),
+            "👋-приветствия": ("👋 Профиль и настройки",
+                "Просмотрите профиль и настройте уведомления.",
+                ProfileView),
+            "🏆-лидерборд": ("🏆 Соревнования",
+                "Лидерборд, дуэли и турниры сервера.",
+                CompetitionView),
+            "🧠-советы-и-стратегии": ("🧠 Стратегия и аналитика",
+                "Мета героев, контр-пики, сравнение и разбор игр.",
+                StrategyView),
+            "🛒-магазин": ("🛒 Магазин Shards",
+                "Ежедневный бонус, товары и баланс.",
+                ShopView),
+        }
+        placed = 0
+        for ch_name, (title, desc, view_cls) in views_map.items():
+            ch = discord.utils.get(ctx.guild.text_channels, name=ch_name)
+            if not ch:
+                continue
+            embed = discord.Embed(title=title, description=desc, color=0x8B4513)
+            # удаляем старое закреплённое сообщение от бота (если есть)
+            try:
+                pins = await ch.pins()
+                for p in pins:
+                    if p.author.id == ctx.bot.user.id:
+                        try:
+                            await p.unpin()
+                            await p.delete()
+                        except discord.HTTPException:
+                            pass
+            except discord.Forbidden:
+                pass
+            msg = await ch.send(embed=embed, view=view_cls(self.db))
+            try:
+                await msg.pin()
+            except discord.Forbidden:
+                pass
+            placed += 1
+        await ctx.send(f"✅ Расставлено {placed} виджетов по каналам.")
 
     @commands.command(name="dota_status_board")
     @commands.has_permissions(manage_channels=True)
