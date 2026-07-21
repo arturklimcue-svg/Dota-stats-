@@ -1115,6 +1115,387 @@ class NavigationView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ---------------- ⚡ стак-сбор (роль + ранг) ----------------
+
+STACK_ROLES = {
+    "carry": "🛡 Кэрри",
+    "support": "💚 Саппорт",
+    "offlane": "⚔️ Офлейн",
+    "mid": "🎯 Мид",
+    "any": "🎲 Любая роль",
+}
+
+STACK_RANKS = {
+    "any": "🎯 Любой ранг",
+    "herald": "1️⃣ Herald",
+    "guardian": "2️⃣ Guardian",
+    "crusader": "3️⃣ Crusader",
+    "archon": "4️⃣ Archon",
+    "legend": "5️⃣ Legend",
+    "ancient": "6️⃣ Ancient",
+    "divine": "7️⃣ Divine",
+    "immortal": "8️⃣ Immortal",
+}
+
+
+class StackGatherView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Собрать стак", emoji="⚡",
+                        style=discord.ButtonStyle.success,
+                        custom_id="stack:start")
+    async def stack_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = StackSetupView(self.db)
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="⚡ Собрать стак",
+                description="Выберите свою роль и ранг:",
+                color=0x8B4513),
+            view=view, ephemeral=True)
+
+
+class StackSetupView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=60)
+        self.db = db
+        self.chosen_role = "any"
+        self.chosen_rank = "any"
+
+    @discord.ui.select(
+        placeholder="Ваша роль",
+        options=[discord.SelectOption(label=v, value=k) for k, v in STACK_ROLES.items()],
+        row=0)
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.chosen_role = select.values[0]
+        await interaction.response.defer()
+        await interaction.message.edit(
+            embed=discord.Embed(
+                title="⚡ Собрать стак",
+                description=f"**Роль:** {STACK_ROLES[self.chosen_role]}\n**Ранг:** {STACK_RANKS[self.chosen_rank]}\n\nНажмите «Найти» чтобы начать поиск.",
+                color=0x8B4513), view=self)
+
+    @discord.ui.select(
+        placeholder="Ваш ранг",
+        options=[discord.SelectOption(label=v, value=k) for k, v in STACK_RANKS.items()],
+        row=1)
+    async def rank_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.chosen_rank = select.values[0]
+        await interaction.response.defer()
+        await interaction.message.edit(
+            embed=discord.Embed(
+                title="⚡ Собрать стак",
+                description=f"**Роль:** {STACK_ROLES[self.chosen_role]}\n**Ранг:** {STACK_RANKS[self.chosen_rank]}\n\nНажмите «Найти» чтобы начать поиск.",
+                color=0x8B4513), view=self)
+
+    @discord.ui.button(label="Найти", emoji="🔍",
+                        style=discord.ButtonStyle.success, row=2)
+    async def find_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.db.stack_join(interaction.guild_id, interaction.user.id,
+                           self.chosen_role, self.chosen_rank)
+        queue = self.db.stack_get_queue(interaction.guild_id)
+        if len(queue) >= 5:
+            await _start_quick_match(interaction.guild, self.db)
+            self.db.stack_clear(interaction.guild_id)
+            await interaction.response.send_message(
+                "⚡ Стак собран! Комната создана.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"⚡ Вы в очереди! Сейчас ищет: {len(queue)}/5\n"
+                f"Роль: {STACK_ROLES[self.chosen_role]} | Ранг: {STACK_RANKS[self.chosen_rank]}",
+                ephemeral=True)
+        self.stop()
+
+
+# ---------------- 📊 мои матчи ----------------
+
+class MyMatchesView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Мои матчи", emoji="📊",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="matches:my")
+    async def matches_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        account_id = self.db.get_account_id(interaction.user.id)
+        if not account_id:
+            await interaction.followup.send(
+                "Сначала привяжите SteamID.", ephemeral=True)
+            return
+        await od.ensure_heroes()
+        matches = await od.get(f"/players/{account_id}/matches?limit=5")
+        if not matches:
+            await interaction.followup.send(
+                "Матчи не найдены.", ephemeral=True)
+            return
+        lines = []
+        for m in matches:
+            won = (m.get("player_slot", 0) < 128) == m.get("radiant_win", False)
+            hero_name = od.heroes_cache.get(m.get("hero_id"), f"Hero#{m.get('hero_id')}")
+            kda = f"{m.get('kills',0)}/{m.get('deaths',0)}/{m.get('assists',0)}"
+            icon = "✅" if won else "❌"
+            lines.append(f"{icon} **{hero_name}** — {kda}")
+        embed = discord.Embed(
+            title="📊 Последние матчи",
+            description="\n".join(lines),
+            color=0x8B4513)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ---------------- 🤝 наставник ----------------
+
+MENTOR_ROLE_NAME = "🤝 Наставник"
+
+# 📅 календарь сервера
+CALENDAR_CHANNEL = "🎉-ивенты"
+
+# 🗳 опрос дня
+DAILY_POLL_CHANNEL = "🎉-ивенты"
+DAILY_POLL_TIME_UTC = dt_time(hour=14, minute=0)
+
+# ⏰ напоминание о турнире (за 15 минут)
+TOURNAMENT_REMINDER_MINUTES = 15
+
+
+class MentorView(discord.ui.View):
+    def __init__(self, db: Storage = None):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Стать наставником", emoji="🤝",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="mentor:toggle")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await get_or_create_role(interaction.guild, MENTOR_ROLE_NAME)
+        member = interaction.user
+        if role in member.roles:
+            await member.remove_roles(role, reason="Отказался от наставничества")
+            await interaction.response.send_message(
+                "🤝 Вы больше не наставник.", ephemeral=True)
+        else:
+            await member.add_roles(role, reason="Стал наставником")
+            if self.db:
+                self.db.grant_achievement(member.id, "mentor")
+            await interaction.response.send_message(
+                "🤝 Вы стали наставником! Новые игроки смогут найти вас.", ephemeral=True)
+
+
+class MentorListView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Список наставников", emoji="📋",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="mentor:list")
+    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = discord.utils.get(interaction.guild.roles, name=MENTOR_ROLE_NAME)
+        if not role or not role.members:
+            await interaction.response.send_message(
+                "📋 Пока нет наставников.", ephemeral=True)
+            return
+        lines = [f"• {m.display_name}" for m in role.members]
+        embed = discord.Embed(
+            title="🤝 Наставники сервера",
+            description="\n".join(lines),
+            color=0x8B4513)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---------------- 🗳 опрос дня ----------------
+
+DAILY_POLL_QUESTIONS = [
+    {"q": "Какой атрибут важнее для кэрри?", "options": ["Сила", "Ловкость", "Интеллект", "Все равно"]},
+    {"q": "Лучший стартовый предмет для мида?", "options": ["Null Talisman", "Wraith Band", "Bracer", "Faerie Fire"]},
+    {"q": "Какой ранг самый populated?", "options": ["Herald", "Guardian", "Crusader", "Archon"]},
+    {"q": "Лучший герой для подъёма MMR?", "options": ["Pudge", "Invoker", "Faceless Void", "Snapfire"]},
+    {"q": "Сколько длится кулдаун buyback на максимальном уровне?", "options": ["60 сек", "90 сек", "120 сек", "180 сек"]},
+    {"q": "Какой предмет даёт True Sight?", "options": ["Dust", "Sentry Ward", "Observer Ward", "Gem"]},
+    {"q": "Самый сильный герой в лейте?", "options": ["Anti-Mage", "Spectre", "Faceless Void", "Phantom Lancer"]},
+    {"q": "Какой нейтральный предмет Tier 5 лучший?", "options": ["Pirate Hat", "Giant's Ring", "Book of the Dead", "Mirror Shield"]},
+]
+
+
+class DailyPollView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Проголосовать", emoji="🗳",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="poll:vote")
+    async def vote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import hashlib
+        today = interaction.created_at.date().isoformat()
+        idx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
+        q = DAILY_POLL_QUESTIONS[idx]
+        view = PollVoteView(idx, q["options"])
+        options = [
+            discord.SelectOption(label=opt, value=str(i))
+            for i, opt in enumerate(q["options"])
+        ]
+        await interaction.response.send_message(
+            embed=discord.Embed(title="🗳 Опрос дня", description=q["q"],
+                                color=0x8B4513),
+            view=view, ephemeral=True)
+
+
+class PollVoteView(discord.ui.View):
+    def __init__(self, question_idx: int, options: list[str]):
+        super().__init__(timeout=120)
+        self.question_idx = question_idx
+        self.options = options
+        self.votes: dict[int, int] = {}
+        sel_options = [discord.SelectOption(label=opt, value=str(i)) for i, opt in enumerate(options)]
+        self.select = discord.ui.Select(placeholder="Ваш ответ", options=sel_options)
+        self.select.callback = self.vote_callback
+        self.add_item(self.select)
+
+    async def vote_callback(self, interaction: discord.Interaction):
+        choice = int(self.select.values[0])
+        self.votes[interaction.user.id] = choice
+        await interaction.response.send_message(
+            f"✅ Вы проголосовали за: **{self.options[choice]}**", ephemeral=True)
+
+
+# ---------------- ⚠️ модерация: предупреждение + таймаут ----------------
+
+class ModWarningView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Предупредить", emoji="⚠️",
+                        style=discord.ButtonStyle.danger,
+                        custom_id="mod:warning")
+    async def warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message(
+                "❌ Нет прав.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ModWarningModal())
+
+
+class ModWarningModal(discord.ui.Modal, title="Предупреждение"):
+    target = discord.ui.TextInput(label="Кому (ID или @mention)", max_length=100)
+    reason = discord.ui.TextInput(label="Причина", style=discord.TextStyle.paragraph, max_length=500)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target_str = str(self.target.value).strip()
+        member = None
+        if target_str.isdigit():
+            member = interaction.guild.get_member(int(target_str))
+        elif target_str.startswith("<@") and target_str.endswith(">"):
+            try:
+                mid = int(target_str[2:-1])
+                member = interaction.guild.get_member(mid)
+            except ValueError:
+                pass
+        if not member:
+            await interaction.response.send_message("❌ Участник не найден.", ephemeral=True)
+            return
+        db.add_warning(interaction.guild_id, member.id, interaction.user.id, str(self.reason))
+        count = db.get_warning_count(interaction.guild_id, member.id)
+        embed = discord.Embed(
+            title="⚠️ Предупреждение",
+            description=f"**{member.display_name}** получил предупреждение #{count}\nПричина: {self.reason.value}",
+            color=0xFF0000)
+        await interaction.response.send_message(embed=embed)
+        mod_log = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_CHANNEL)
+        if mod_log:
+            await mod_log.send(
+                f"⚠️ **{interaction.user}** предупредил **{member}**: {self.reason.value} "
+                f"(всего предупреждений: {count})")
+
+
+class ModTimeoutView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Таймаут", emoji="🔇",
+                        style=discord.ButtonStyle.danger,
+                        custom_id="mod:timeout")
+    async def timeout_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message(
+                "❌ Нет прав.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ModTimeoutModal())
+
+
+class ModTimeoutModal(discord.ui.Modal, title="Таймаут"):
+    target = discord.ui.TextInput(label="Кому (ID или @mention)", max_length=100)
+    duration = discord.ui.TextInput(label="Минут (1-1440)", max_length=5, default="10")
+    reason = discord.ui.TextInput(label="Причина", style=discord.TextStyle.paragraph, max_length=500)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target_str = str(self.target.value).strip()
+        member = None
+        if target_str.isdigit():
+            member = interaction.guild.get_member(int(target_str))
+        elif target_str.startswith("<@") and target_str.endswith(">"):
+            try:
+                mid = int(target_str[2:-1])
+                member = interaction.guild.get_member(mid)
+            except ValueError:
+                pass
+        if not member:
+            await interaction.response.send_message("❌ Участник не найден.", ephemeral=True)
+            return
+        try:
+            mins = max(1, min(1440, int(self.duration.value)))
+        except ValueError:
+            mins = 10
+        try:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=mins),
+                                 reason=f"{interaction.user}: {self.reason.value}")
+            embed = discord.Embed(
+                title="🔇 Таймаут",
+                description=f"**{member.display_name}** замьючен на {mins} мин\nПричина: {self.reason.value}",
+                color=0xFF0000)
+            await interaction.response.send_message(embed=embed)
+            mod_log = discord.utils.get(interaction.guild.text_channels, name=MOD_LOG_CHANNEL)
+            if mod_log:
+                await mod_log.send(
+                    f"🔇 **{interaction.user}** замьютил **{member}** на {mins} мин: {self.reason.value}")
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Не удалось замутить.", ephemeral=True)
+
+
+# ---------------- 📅 календарь сервера ----------------
+
+class CalendarView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Календарь", emoji="📅",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="calendar:show")
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📅 Календарь сервера",
+            description="Ближайшие события и активности:",
+            color=0x8B4513)
+        embed.add_field(
+            name="🎮 Еженедельные",
+            value=(
+                "• Пн 10:00 — Дайджест меты\n"
+                "• Вт-Пт 12:00 — Квест дня\n"
+                "• Сб — Турнир недели (если создан)"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🎯 Как участвовать",
+            value=(
+                "• 🏆 Турниры — кнопка в #🏆-лидерборд\n"
+                "• 🐲 Квест дня — кнопка в #🎉-ивенты\n"
+                "• 📺 Стримы — кнопка в #🎉-ивенты"
+            ),
+            inline=False)
+        embed.set_footer(text="Следите за объявлениями!")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ---------------- cog ----------------
 
 class ServerManagement(commands.Cog):
@@ -1131,6 +1512,8 @@ class ServerManagement(commands.Cog):
         self.daily_verification_sweep.start()
         self.daily_quest_post.start()
         self.verify_reminder.start()
+        self.daily_poll_post.start()
+        self.tournament_reminder.start()
 
     def cog_unload(self):
         self.resync_ranks.cancel()
@@ -1142,6 +1525,8 @@ class ServerManagement(commands.Cog):
         self.daily_verification_sweep.cancel()
         self.daily_quest_post.cancel()
         self.verify_reminder.cancel()
+        self.daily_poll_post.cancel()
+        self.tournament_reminder.cancel()
 
     async def cog_load(self):
         self.bot.add_view(VerificationView(self.db))
@@ -1157,6 +1542,14 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(DailyQuestView())
         self.bot.add_view(StreamButtonView())
         self.bot.add_view(NavigationView())
+        self.bot.add_view(StackGatherView(self.db))
+        self.bot.add_view(MyMatchesView(self.db))
+        self.bot.add_view(MentorView(self.db))
+        self.bot.add_view(MentorListView())
+        self.bot.add_view(DailyPollView())
+        self.bot.add_view(ModWarningView())
+        self.bot.add_view(ModTimeoutView())
+        self.bot.add_view(CalendarView())
 
     # ---------- вход нового участника ----------
 
@@ -1259,6 +1652,66 @@ class ServerManagement(commands.Cog):
 
     @verify_reminder.before_loop
     async def before_verify_reminder(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- ежедневный опрос ----------
+
+    @tasks.loop(time=DAILY_POLL_TIME_UTC)
+    async def daily_poll_post(self):
+        import hashlib
+        today = discord.utils.utcnow().date().isoformat()
+        idx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
+        q = DAILY_POLL_QUESTIONS[idx]
+        for guild in self.bot.guilds:
+            ch = discord.utils.get(guild.text_channels, name=DAILY_POLL_CHANNEL)
+            if not ch:
+                continue
+            embed = discord.Embed(
+                title="🗳 Опрос дня",
+                description=q["q"],
+                color=0x8B4513)
+            options_text = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(q["options"]))
+            embed.add_field(name="Варианты:", value=options_text, inline=False)
+            embed.set_footer(text="Нажмите кнопку, чтобы проголосовать!")
+            try:
+                await ch.send(embed=embed, view=DailyPollView())
+            except discord.HTTPException:
+                pass
+
+    @daily_poll_post.before_loop
+    async def before_daily_poll(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- напоминание о турнире ----------
+
+    @tasks.loop(minutes=5)
+    async def tournament_reminder(self):
+        from datetime import datetime as dt, timezone
+        now = dt.now(timezone.utc)
+        for guild in self.bot.guilds:
+            active = self.db.conn.execute(
+                "SELECT id, name FROM tournaments WHERE guild_id=? AND status='active'",
+                (guild.id,)).fetchall()
+            for tid, tname in active:
+                matches = self.db.conn.execute(
+                    "SELECT player1_id, player2_id, status FROM tournament_matches "
+                    "WHERE tournament_id=? AND status='pending'", (tid,)).fetchall()
+                for p1, p2, _ in matches:
+                    for pid in [p1, p2]:
+                        if not pid:
+                            continue
+                        member = guild.get_member(pid)
+                        if not member:
+                            continue
+                        try:
+                            await member.send(
+                                f"🏆 **Напоминание!** У вас матч в турнире «{tname}».\n"
+                                f"Зайдите в канал турнира, чтобы начать.")
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
+
+    @tournament_reminder.before_loop
+    async def before_tournament_reminder(self):
         await self.bot.wait_until_ready()
 
     # ---------- периодическая пересинхронизация рангов ----------
@@ -1993,6 +2446,113 @@ class ServerManagement(commands.Cog):
                 await post_pinned_info(ch, title, text, view=NotifyRoleView())
             else:
                 await post_pinned_info(ch, title, text)
+
+        # ---- ⚡ стак-сбор (в лфг) ----
+        lfg_ch = discord.utils.get(guild.text_channels, name=LFG_CHANNEL)
+        if lfg_ch:
+            stack_embed = discord.Embed(
+                title="⚡ Собрать стак",
+                description="Нажмите, чтобы найти тиму по роли и рангу.",
+                color=0x8B4513)
+            lfg_pins = await lfg_ch.pins()
+            has_stack = any(
+                e.title == "⚡ Собрать стак" for p in lfg_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_stack:
+                stack_msg = await lfg_ch.send(embed=stack_embed, view=StackGatherView(self.db))
+                try:
+                    await stack_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- 📊 мои матчи (в лидерборд) ----
+        lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
+        if lb_ch:
+            mm_embed = discord.Embed(
+                title="📊 Мои матчи",
+                description="Нажмите, чтобы увидеть последние 5 матчей.",
+                color=0x8B4513)
+            lb_pins = await lb_ch.pins()
+            has_mm = any(
+                e.title == "📊 Мои матчи" for p in lb_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_mm:
+                mm_msg = await lb_ch.send(embed=mm_embed, view=MyMatchesView(self.db))
+                try:
+                    await mm_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- 🤝 наставники (в правилах) ----
+        rules_ch = discord.utils.get(guild.text_channels, name="📜-правила")
+        if rules_ch:
+            mentor_embed = discord.Embed(
+                title="🤝 Наставники",
+                description=(
+                    "Опытные игроки могут стать наставниками.\n"
+                    "Новички — нажмите кнопку, чтобы увидеть список наставников."
+                ),
+                color=0x8B4513)
+            rules_pins = await rules_ch.pins()
+            has_mentor = any(
+                e.title == "🤝 Наставники" for p in rules_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_mentor:
+                mentor_view = discord.ui.View()
+                mentor_view.add_item(discord.ui.Button(
+                    label="Стать наставником", emoji="🤝",
+                    style=discord.ButtonStyle.primary, custom_id="mentor:toggle"))
+                mentor_view.add_item(discord.ui.Button(
+                    label="Список наставников", emoji="📋",
+                    style=discord.ButtonStyle.secondary, custom_id="mentor:list"))
+                mentor_msg = await rules_ch.send(embed=mentor_embed, view=mentor_view)
+                try:
+                    await mentor_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- 📅 календарь (в ивенты) ----
+        ev_ch = discord.utils.get(guild.text_channels, name=STREAMS_CHANNEL)
+        if ev_ch:
+            cal_embed = discord.Embed(
+                title="📅 Ближайшие события",
+                description="Нажмите кнопку, чтобы увидеть календарь сервера.",
+                color=0x8B4513)
+            ev_pins = await ev_ch.pins()
+            has_cal = any(
+                e.title == "📅 Ближайшие события" for p in ev_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_cal:
+                cal_msg = await ev_ch.send(embed=cal_embed, view=CalendarView())
+                try:
+                    await cal_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- ⚠️ модерация кнопки (в mod-log) ----
+        mod_ch = discord.utils.get(guild.text_channels, name=MOD_LOG_CHANNEL)
+        if mod_ch:
+            mod_embed = discord.Embed(
+                title="🛠 Панель модерации",
+                description="Используйте кнопки ниже для предупреждений и таймаутов.",
+                color=0xFF0000)
+            mod_pins = await mod_ch.pins()
+            has_mod_btn = any(
+                e.title == "🛠 Панель модерации" for p in mod_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_mod_btn:
+                mod_view = discord.ui.View()
+                mod_view.add_item(discord.ui.Button(
+                    label="Предупредить", emoji="⚠️",
+                    style=discord.ButtonStyle.danger, custom_id="mod:warning"))
+                mod_view.add_item(discord.ui.Button(
+                    label="Таймаут", emoji="🔇",
+                    style=discord.ButtonStyle.danger, custom_id="mod:timeout"))
+                mod_msg = await mod_ch.send(embed=mod_embed, view=mod_view)
+                try:
+                    await mod_msg.pin()
+                except discord.Forbidden:
+                    pass
 
         # ---- 📋 навигация (в канал правил) ----
         nav_ch = discord.utils.get(guild.text_channels, name=NAVIGATION_CHANNEL)

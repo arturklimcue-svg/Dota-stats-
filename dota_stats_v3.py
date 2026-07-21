@@ -396,6 +396,11 @@ ACHIEVEMENTS = {
     "wr_above_60":   ("💎", "Стратег"),
     "hero_master":   ("🎭", "Мастер героя"),
     "shards_1000":   ("✨", "Коллекционер"),
+    "stream_1":      ("📺", "Стример"),
+    "quest_5":       ("🐲", "Знаток"),
+    "mentor":        ("🤝", "Наставник"),
+    "stack_10":      ("⚡", "Командный игрок"),
+    "tournament_1":  ("🏅", "Турнирный игрок"),
 }
 
 # --- виртуальная валюта (shards) ---
@@ -654,6 +659,26 @@ class Storage:
                 c.execute("INSERT INTO shop_items (name, description, cost, item_type, value, emoji) "
                           "VALUES (?, ?, ?, ?, ?, ?)", (name, desc, cost, itype, val, emoji))
 
+        # --- предупреждения (модерация) ---
+        c.execute("""CREATE TABLE IF NOT EXISTS warnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            moderator_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+
+        # --- стак-сбор (быстрый матч) ---
+        c.execute("""CREATE TABLE IF NOT EXISTS stack_gather (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            rank TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+
         c.commit()
 
     def register(self, discord_id: int, account_id: int, steam_id64: int):
@@ -890,6 +915,60 @@ class Storage:
         return self.conn.execute(
             "SELECT discord_id, wins, losses FROM duel_stats WHERE (wins + losses) > 0 "
             "ORDER BY wins DESC, losses ASC LIMIT ?", (limit,)).fetchall()
+
+    # ==================== предупреждения ====================
+
+    def add_warning(self, guild_id: int, discord_id: int, moderator_id: int, reason: str):
+        self.conn.execute(
+            "INSERT INTO warnings (guild_id, discord_id, moderator_id, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (guild_id, discord_id, moderator_id, reason,
+             datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
+    def get_warnings(self, guild_id: int, discord_id: int) -> list[tuple]:
+        return self.conn.execute(
+            "SELECT id, moderator_id, reason, created_at FROM warnings "
+            "WHERE guild_id=? AND discord_id=? ORDER BY created_at DESC",
+            (guild_id, discord_id)).fetchall()
+
+    def get_warning_count(self, guild_id: int, discord_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id=? AND discord_id=?",
+            (guild_id, discord_id)).fetchone()
+        return row[0] if row else 0
+
+    def remove_warning(self, warning_id: int):
+        self.conn.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
+        self.conn.commit()
+
+    # ==================== стак-сбор ====================
+
+    def stack_join(self, guild_id: int, discord_id: int, role: str, rank: str):
+        self.conn.execute(
+            "DELETE FROM stack_gather WHERE guild_id=? AND discord_id=?",
+            (guild_id, discord_id))
+        self.conn.execute(
+            "INSERT INTO stack_gather (guild_id, discord_id, role, rank, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (guild_id, discord_id, role, rank,
+             datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
+    def stack_leave(self, guild_id: int, discord_id: int):
+        self.conn.execute(
+            "DELETE FROM stack_gather WHERE guild_id=? AND discord_id=?",
+            (guild_id, discord_id))
+        self.conn.commit()
+
+    def stack_get_queue(self, guild_id: int) -> list[tuple]:
+        return self.conn.execute(
+            "SELECT discord_id, role, rank FROM stack_gather WHERE guild_id=?",
+            (guild_id,)).fetchall()
+
+    def stack_clear(self, guild_id: int):
+        self.conn.execute("DELETE FROM stack_gather WHERE guild_id=?", (guild_id,))
+        self.conn.commit()
 
     # ==================== достижения ====================
 
