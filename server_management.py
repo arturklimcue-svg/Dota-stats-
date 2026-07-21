@@ -888,6 +888,7 @@ class VoiceReportView(discord.ui.View):
 
 quick_match_queues: dict[int, list[discord.Member]] = {}
 quick_match_locks: dict[int, asyncio.Lock] = {}
+quick_match_messages: dict[int, list[int]] = {}  # guild_id -> [message_ids]
 
 
 class QuickMatchView(discord.ui.View):
@@ -904,6 +905,8 @@ class QuickMatchView(discord.ui.View):
             quick_match_queues[guild_id] = []
         if guild_id not in quick_match_locks:
             quick_match_locks[guild_id] = asyncio.Lock()
+        if guild_id not in quick_match_messages:
+            quick_match_messages[guild_id] = []
 
         async with quick_match_locks[guild_id]:
             queue = quick_match_queues[guild_id]
@@ -922,10 +925,81 @@ class QuickMatchView(discord.ui.View):
                     + "\n\nКогда соберётся 5 — бот создаст войс-комнату."
                 ),
                 color=0x8B4513)
-            await interaction.response.send_message(embed=embed)
+            cancel_view = QuickMatchCancelView(interaction.guild_id)
+            msg = await interaction.response.send_message(embed=embed, view=cancel_view)
+            # store the interaction message for cleanup
+            try:
+                msg_obj = await interaction.original_response()
+                quick_match_messages[guild_id].append(msg_obj.id)
+            except Exception:
+                pass
 
             if count >= 5:
+                # delete all queue messages
+                ch = discord.utils.get(interaction.guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
+                if ch:
+                    for mid in quick_match_messages.get(guild_id, []):
+                        try:
+                            old_msg = await ch.fetch_message(mid)
+                            await old_msg.delete()
+                        except (discord.NotFound, discord.Forbidden):
+                            pass
+                    quick_match_messages[guild_id].clear()
                 await _start_quick_match(interaction.guild, self.db)
+
+
+class QuickMatchCancelView(discord.ui.View):
+    """Кнопка отмены поиска — убирает из очереди и удаляет сообщение."""
+    def __init__(self, guild_id: int = 0):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Отменить поиск", emoji="❌",
+                        style=discord.ButtonStyle.danger,
+                        custom_id="quick_match:cancel")
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild_id
+        if guild_id not in quick_match_queues:
+            await interaction.response.send_message("Очередь пуста.", ephemeral=True)
+            return
+
+        if guild_id not in quick_match_locks:
+            quick_match_locks[guild_id] = asyncio.Lock()
+        async with quick_match_locks[guild_id]:
+            queue = quick_match_queues[guild_id]
+            if interaction.user not in queue:
+                await interaction.response.send_message("Вы не в очереди.", ephemeral=True)
+                return
+            queue.remove(interaction.user)
+
+            # delete the queue messages
+            ch = discord.utils.get(interaction.guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
+            if ch:
+                for mid in quick_match_messages.get(guild_id, []):
+                    try:
+                        old_msg = await ch.fetch_message(mid)
+                        await old_msg.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+                quick_match_messages[guild_id].clear()
+
+            if queue:
+                # re-post updated queue
+                embed = discord.Embed(
+                    title="⚡ Быстрый матч",
+                    description=(
+                        f"**Ищут игру:** {len(queue)}/5\n\n"
+                        + "\n".join(f"• {m.display_name}" for m in queue)
+                        + "\n\nКогда соберётся 5 — бот создаст войс-комнату."
+                    ),
+                    color=0x8B4513)
+                cancel_view = QuickMatchCancelView(guild_id)
+                msg = await ch.send(embed=embed, view=cancel_view) if ch else None
+                if msg:
+                    quick_match_messages[guild_id].append(msg.id)
+
+            await interaction.response.send_message(
+                "❌ Вы вышли из очереди.", ephemeral=True)
 
 
 async def _start_quick_match(guild: discord.Guild, storage: Storage):
@@ -1731,6 +1805,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(VoiceReportView())
         self.bot.add_view(QuickMatchView(self.db))
+        self.bot.add_view(QuickMatchCancelView(0))
         self.bot.add_view(DailyQuestView())
         self.bot.add_view(StreamButtonView())
         self.bot.add_view(NavigationView())
