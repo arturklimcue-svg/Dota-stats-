@@ -28,6 +28,7 @@ server_management.py — верификация по SteamID, ранговые �
 """
 
 import asyncio
+import hashlib
 import random
 from datetime import timedelta, time as dt_time
 from pathlib import Path
@@ -84,12 +85,9 @@ GUEST_CHANNEL = "🎮-гости"
 SHOP_CATEGORY = "🛒 Магазин"
 SHOP_CHANNEL = "🛒-магазин"
 
-RANK_VOICE_NAMES = []  # убраны — вместо них ранговые голосовые при создании комнат
-
 JOIN_TO_CREATE_CATEGORY = "🎙 Голосовые комнаты"
 
 VOICE_ROOM_CREATE_CHANNEL = "🎮-создание-комнат"
-VOICE_ROOM_CHAT_CHANNELS = []
 VOICE_REPORT_CHANNEL = "🚨-жалобы"
 
 GAME_MODE_NAMES = {
@@ -101,6 +99,7 @@ GAME_MODE_NAMES = {
 
 STAFF_CATEGORY = "🛠 Модерация"
 STAFF_ROLE_NAME = "Moderator"
+DUELIST_ROLE_NAME = "⚔️ Дуэлянт"
 
 PARTY_THREAD_ARCHIVE_MINUTES = 60
 
@@ -162,7 +161,7 @@ MMR_PROGRESS_CHANNEL = "🏆-лидерборд"
 FAQ_CHANNEL = "📜-правила"
 
 # 🔔 токсичность
-TOXICITY_TRIGGER_WORDS = ["IDIOT", "NOOB", "FEEDER", "ТВОЙ МАМА", "IDIOT", "N00B", "RETARD"]
+TOXICITY_TRIGGER_WORDS = ["IDIOT", "NOOB", "FEEDER", "ТВОЙ МАМА", "N00B", "RETARD"]
 TOXICITY_THRESHOLD = 3
 
 # 📈 еженедельный дайджест меты — топ-5 героев по пикрейту, по понедельникам
@@ -215,6 +214,7 @@ CHANNEL_TOPICS = {
     "🎮-создание-комнат": "Создание голосовых комнат + быстрый матч",
     PATCH_ANALYTICS_CHANNEL: "Аналитика патчей: победители, проигравшие, мета",
     GUEST_CHANNEL: "Гостевая зона — создайте временную голосовую комнату для общения",
+    MOD_LOG_CHANNEL: "Лог действий модераторов: предупреждения, таймауты, жалобы",
 }
 
 # ---- закреплённые сообщения: канал -> (заголовок, текст) ----
@@ -741,6 +741,7 @@ class VoiceRoomSetupView(discord.ui.View):
             overwrites=overwrites,
             reason=f"Создано {member}: {mode_label}, {rank_label}, {self.size} мест")
         self.db.register_voice_channel(temp.id, guild.id)
+        self.db.protect_voice_target(temp.id, guild.id, "voice")
         await member.move_to(temp)
 
         if self.rank == "any":
@@ -913,18 +914,18 @@ class QuickMatchView(discord.ui.View):
             queue.append(interaction.user)
             count = len(queue)
 
-        embed = discord.Embed(
-            title="⚡ Быстрый матч",
-            description=(
-                f"**Ищут игру:** {count}/5\n\n"
-                + "\n".join(f"• {m.display_name}" for m in queue)
-                + "\n\nКогда соберётся 5 — бот создаст войс-комнату."
-            ),
-            color=0x8B4513)
-        await interaction.response.send_message(embed=embed)
+            embed = discord.Embed(
+                title="⚡ Быстрый матч",
+                description=(
+                    f"**Ищут игру:** {count}/5\n\n"
+                    + "\n".join(f"• {m.display_name}" for m in queue)
+                    + "\n\nКогда соберётся 5 — бот создаст войс-комнату."
+                ),
+                color=0x8B4513)
+            await interaction.response.send_message(embed=embed)
 
-        if count >= 5:
-            await _start_quick_match(interaction.guild, self.db)
+            if count >= 5:
+                await _start_quick_match(interaction.guild, self.db)
 
 
 async def _start_quick_match(guild: discord.Guild, storage: Storage):
@@ -1029,7 +1030,6 @@ class DailyQuestView(discord.ui.View):
                         style=discord.ButtonStyle.primary,
                         custom_id="daily_quest:answer")
     async def answer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        import hashlib
         today = interaction.created_at.date().isoformat()
         idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
         q = DAILY_QUEST_QUESTIONS[idx]
@@ -1307,7 +1307,6 @@ class DailyPollView(discord.ui.View):
                         style=discord.ButtonStyle.primary,
                         custom_id="poll:vote")
     async def vote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        import hashlib
         today = interaction.created_at.date().isoformat()
         idx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
         q = DAILY_POLL_QUESTIONS[idx]
@@ -1606,7 +1605,64 @@ class InterestSelectView(discord.ui.View):
         self.stop()
 
 
+# ---------------- ⚔️ роль дуэлянта ----------------
+
+class DuelistRoleView(discord.ui.View):
+    """Кнопка для получения/снятия роли «⚔️ Дуэлянт» — только обладатели
+    этой роли могут участвовать в недельных дуэлях."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Стать дуэлянтом", emoji="⚔️",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="duelist:toggle")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await get_or_create_role(interaction.guild, DUELIST_ROLE_NAME)
+        member = interaction.user
+        if role in member.roles:
+            await member.remove_roles(role, reason="Отказался от дуэлей")
+            await interaction.response.send_message(
+                "⚔️ Вы больше не дуэлянт — недельные дуэли вам не предлагаются.", ephemeral=True)
+        else:
+            await member.add_roles(role, reason="Стал дуэлянтом")
+            await interaction.response.send_message(
+                "⚔️ Вы стали дуэлянтом! Если вы в топе лидерборда — вам будет предложена дуэль.",
+                ephemeral=True)
+
+
 # ---------------- 🔔 токсичность ----------------
+
+
+class SetupConfirmView(discord.ui.View):
+    """Кнопка подтверждения для server_setup — предотвращает случайное удаление каналов."""
+    def __init__(self, channel_count: int):
+        super().__init__(timeout=30)
+        self.confirmed = False
+        self.channel_count = channel_count
+
+    @discord.ui.button(label="Да, настроить", emoji="✅",
+                        style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только администратор.", ephemeral=True)
+            return
+        self.confirmed = True
+        await interaction.response.send_message("⏳ Настройка запущена...", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Отмена", emoji="❌",
+                        style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только администратор.", ephemeral=True)
+            return
+        await interaction.response.send_message("❌ Настройка сервера отменена.", ephemeral=True)
+        self.stop()
+
+    async def on_timeout(self):
+        self.stop()
+
 
 class ToxicityAlertListener(commands.Cog):
     def __init__(self, bot):
@@ -1639,7 +1695,6 @@ class ServerManagement(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = db  # общий экземпляр с dota_stats_v3
-        self.temp_voice_channels: set[int] = set()
         self.resync_ranks.start()
         self.auto_purge.start()
         self.update_stats_channels.start()
@@ -1689,6 +1744,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(FAQView())
         self.bot.add_view(MMRProgressView(self.db))
         self.bot.add_view(InterestRolesView())
+        self.bot.add_view(DuelistRoleView())
 
     # ---------- вход нового участника ----------
 
@@ -1733,7 +1789,6 @@ class ServerManagement(commands.Cog):
 
     @tasks.loop(time=DAILY_QUEST_TIME_UTC)
     async def daily_quest_post(self):
-        import hashlib
         today = discord.utils.utcnow().date().isoformat()
         idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
         q = DAILY_QUEST_QUESTIONS[idx]
@@ -1806,7 +1861,6 @@ class ServerManagement(commands.Cog):
 
     @tasks.loop(time=DAILY_POLL_TIME_UTC)
     async def daily_poll_post(self):
-        import hashlib
         today = discord.utils.utcnow().date().isoformat()
         idx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
         q = DAILY_POLL_QUESTIONS[idx]
@@ -1903,13 +1957,17 @@ class ServerManagement(commands.Cog):
     async def on_voice_state_update(self, member: discord.Member,
                                      before: discord.VoiceState, after: discord.VoiceState):
         # удаление опустевших временных каналов
-        if before.channel and before.channel.id in self.temp_voice_channels:
-            if len(before.channel.members) == 0:
+        if before.channel:
+            is_bot_managed = self.db.is_managed_voice_channel(before.channel.id)
+            is_protected = self.db.is_voice_protected(
+                before.channel.id, before.channel.category_id if before.channel.category else None,
+                before.channel.guild.id)
+            if is_bot_managed and not is_protected and len(before.channel.members) == 0:
                 try:
                     await before.channel.delete(reason="Временный войс опустел")
                 except discord.NotFound:
                     pass
-                self.temp_voice_channels.discard(before.channel.id)
+                self.db.unregister_voice_channel(before.channel.id)
 
     # ---------- треды вместо спама в ЛФГ ----------
 
@@ -2066,6 +2124,8 @@ class ServerManagement(commands.Cog):
 
     @tasks.loop(time=PATCH_ANALYTICS_TIME_UTC)
     async def daily_patch_digest(self):
+        if discord.utils.utcnow().weekday() != 3:  # только по четвергам
+            return
         for guild in self.bot.guilds:
             channel = discord.utils.get(guild.text_channels, name=PATCH_ANALYTICS_CHANNEL)
             if not channel:
@@ -2286,6 +2346,33 @@ class ServerManagement(commands.Cog):
         ВНИМАНИЕ: переписывает права @everyone на всех существующих каналах."""
         guild = ctx.guild
         everyone = guild.default_role
+
+        # ---- safety confirmation: count channels that will be affected ----
+        non_bot_channels = []
+        for ch in guild.channels:
+            if ch.type == discord.ChannelType.category:
+                continue
+            if ch.category and ch.category.name in {
+                INFO_CATEGORY, COMMUNITY_CATEGORY, STRATEGY_CATEGORY, GAME_CATEGORY,
+                SHOP_CATEGORY, JOIN_TO_CREATE_CATEGORY, STATS_CATEGORY, STAFF_CATEGORY,
+                GUEST_CATEGORY,
+            }:
+                continue
+            if ch.category and ch.category.name == STAFF_CATEGORY:
+                continue
+            non_bot_channels.append(ch)
+
+        if non_bot_channels:
+            confirm_view = SetupConfirmView(len(non_bot_channels))
+            await ctx.send(
+                f"⚠️ **Внимание!** Будет перезаписаны права @everyone на "
+                f"**{len(non_bot_channels)}** каналов и удалены лишние каналы.\n"
+                "Это действие необратимо для текущих прав каналов.",
+                view=confirm_view)
+            await confirm_view.wait()
+            if not confirm_view.confirmed:
+                await ctx.send("❌ Настройка сервера отменена.")
+                return
 
         unverified = await get_or_create_role(guild, UNVERIFIED_ROLE)
         verified = await get_or_create_role(guild, VERIFIED_ROLE)
@@ -2534,18 +2621,13 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # ---- чаты для общения ----
-        for ch_name in VOICE_ROOM_CHAT_CHANNELS:
-            chat_ch = discord.utils.get(guild.text_channels, name=ch_name)
-            if not chat_ch:
-                chat_ch = await guild.create_text_channel(ch_name, category=jtc_category)
-            await chat_ch.set_permissions(verified, view_channel=True, send_messages=True)
-
         # ---- канал жалоб ----
         report_ch = discord.utils.get(guild.text_channels, name=VOICE_REPORT_CHANNEL)
         if not report_ch:
             report_ch = await guild.create_text_channel(VOICE_REPORT_CHANNEL, category=jtc_category)
-        await report_ch.set_permissions(everyone, send_messages=True, view_channel=True)
+        await report_ch.set_permissions(everyone, send_messages=False, view_channel=True)
+        await report_ch.set_permissions(verified, send_messages=True, view_channel=True)
+        await report_ch.set_permissions(unverified, view_channel=False)
         report_pins = await report_ch.pins()
         if not report_pins:
             rp_embed = discord.Embed(
@@ -2594,14 +2676,6 @@ class ServerManagement(commands.Cog):
             await category.edit(overwrites=overwrites)
             if not category.text_channels:
                 await guild.create_text_channel("⚔-чат", category=category)
-            for vc_name in RANK_VOICE_NAMES:
-                vc = discord.utils.get(category.voice_channels, name=vc_name)
-                if not vc:
-                    vc = await guild.create_voice_channel(vc_name, category=category)
-                # ВАЖНО: это постоянные каналы, а не join-to-create — без защиты
-                # их снесёт общий листенер автоудаления пустых войсов в
-                # dota_stats_v3.py (on_voice_state_update) при первом же опустении
-                self.db.protect_voice_target(vc.id, guild.id, "channel")
 
         # ---- 🛠 Модерация (staff-only) ----
         staff_role = discord.utils.get(guild.roles, name=STAFF_ROLE_NAME)
@@ -2662,6 +2736,24 @@ class ServerManagement(commands.Cog):
                 mmr_msg = await lb_ch.send(embed=mmr_embed, view=MMRProgressView(self.db))
                 try:
                     await mmr_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+            # ---- ⚔️ роль дуэлянта (в лидерборд) ----
+            duelist_embed = discord.Embed(
+                title="⚔️ Дуэлянты",
+                description=(
+                    "Нажмите кнопку, чтобы стать дуэлянтом!\n"
+                    "Только обладатели этой роли участвуют в недельных дуэлях."
+                ),
+                color=0xE67E22)
+            has_duelist = any(
+                e.title == "⚔️ Дуэлянты" for p in lb_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_duelist:
+                duelist_msg = await lb_ch.send(embed=duelist_embed, view=DuelistRoleView())
+                try:
+                    await duelist_msg.pin()
                 except discord.Forbidden:
                     pass
 
@@ -2796,7 +2888,6 @@ class ServerManagement(commands.Cog):
 
         # ---- 🐲 квест дня (в ивенты) ----
         if events_ch:
-            import hashlib
             today = discord.utils.utcnow().date().isoformat()
             idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
             q = DAILY_QUEST_QUESTIONS[idx]
@@ -2820,7 +2911,6 @@ class ServerManagement(commands.Cog):
 
         # ---- 🗳 опрос дня (в ивенты) ----
         if events_ch:
-            import hashlib
             today = discord.utils.utcnow().date().isoformat()
             pidx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
             pq = DAILY_POLL_QUESTIONS[pidx]
