@@ -157,23 +157,44 @@ PATCH_ANALYTICS_TIME_UTC = dt_time(hour=11, minute=0)
 # 🔇 каналы, где обычным участникам нельзя писать текст — только кнопки/модалки бота
 READ_ONLY_CHANNELS = ["🧠-стратегия", "🏆-лидерборд", STATUS_BOARD_CHANNEL, SHOP_CHANNEL, PATCH_ANALYTICS_CHANNEL]
 
+# ⚡ быстрый матч
+QUICK_MATCH_CHANNEL = "🎮-создание-комнат"
+QUICK_MATCH_TIMEOUT_SECONDS = 60
+QUICK_MATCH_ROLE_NAME = "⚡ Ищет игру"
+
+# 🐲 квест дня
+DAILY_QUEST_CHANNEL = "🎉-ивенты"
+DAILY_QUEST_TIME_UTC = dt_time(hour=12, minute=0)
+DAILY_QUEST_ROLE_NAME = "🐲 Знаток дня"
+
+# 📺 стримы сервера
+STREAMS_ROLE_NAME = "📺 Стример"
+STREAMS_CHANNEL = "🎉-ивенты"
+
+# 📋 навигация
+NAVIGATION_CHANNEL = "📜-правила"
+
+# 💬 напоминание о верификации
+VERIFY_REMINDER_INTERVAL_HOURS = 6
+
 # 🧹 автоочистка чатов внутри КАЖДОЙ ранговой категории (все они называются
 # одинаково "⚔-чат", поэтому чистятся не по имени, а перебором категорий)
 RANK_CHAT_PURGE_HOURS = 8
 
 # 📝 темы (описания под названием) для визуального оформления каналов
 CHANNEL_TOPICS = {
-    "📜-правила": "Обязательно к прочтению перед общением на сервере",
+    "📜-правила": "Обязательно к прочтению перед общением на сервере + навигация по серверу",
     "📢-объявления": "Новости сервера, патчи, турниры — публикует администрация и бот",
     "👋-приветствия": "Бот здоровается с новыми верифицированными игроками",
     "💬-чат": "Общение на любые темы, связанные с Dota 2",
-    "🎉-ивенты": "Анонсы и обсуждение внутренних мероприятий сервера",
+    "🎉-ивенты": "Анонсы, обсуждение мероприятий, квест дня и стримы",
     "🔍-лфг": "Ищете пати? Жмите кнопку — бот создаст тред",
     "🟢-кто-в-игре": "Автообновляемая доска — кто из участников сейчас играет",
     "🏆-лидерборд": "Топ сервера по винрейту — только кнопка",
     "🧠-стратегия": "Панель статистики и стратегий — только кнопки",
     "🐲-бестиарий": "Обсуждение героев и кнопка «случайный герой»",
     "🛒-магазин": "Магазин shards: ежедневный бонус, товары и баланс",
+    "🎮-создание-комнат": "Создание голосовых комнат + быстрый матч",
     PATCH_ANALYTICS_CHANNEL: "Аналитика патчей: победители, проигравшие, мета",
     GUEST_CHANNEL: "Гостевая зона — создайте временную голосовую комнату для общения",
 }
@@ -834,6 +855,266 @@ class VoiceReportView(discord.ui.View):
         await interaction.response.send_modal(VoiceReportModal())
 
 
+# ---------------- ⚡ быстрый матч ----------------
+
+quick_match_queues: dict[int, list[discord.Member]] = {}
+quick_match_locks: dict[int, asyncio.Lock] = {}
+
+
+class QuickMatchView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Найти тиму", emoji="⚡",
+                        style=discord.ButtonStyle.success,
+                        custom_id="quick_match:start")
+    async def find_match_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild_id
+        if guild_id not in quick_match_queues:
+            quick_match_queues[guild_id] = []
+        if guild_id not in quick_match_locks:
+            quick_match_locks[guild_id] = asyncio.Lock()
+
+        async with quick_match_locks[guild_id]:
+            queue = quick_match_queues[guild_id]
+            if interaction.user in queue:
+                await interaction.response.send_message(
+                    "Вы уже в очереди! Дождитесь начала.", ephemeral=True)
+                return
+            queue.append(interaction.user)
+            count = len(queue)
+
+        embed = discord.Embed(
+            title="⚡ Быстрый матч",
+            description=(
+                f"**Ищут игру:** {count}/5\n\n"
+                + "\n".join(f"• {m.display_name}" for m in queue)
+                + "\n\nКогда соберётся 5 — бот создаст войс-комнату."
+            ),
+            color=0x8B4513)
+        await interaction.response.send_message(embed=embed)
+
+        if count >= 5:
+            await _start_quick_match(interaction.guild, self.db)
+
+
+async def _start_quick_match(guild: discord.Guild, storage: Storage):
+    guild_id = guild.id
+    async with quick_match_locks.get(guild_id, asyncio.Lock()):
+        queue = quick_match_queues.get(guild_id, [])
+        if len(queue) < 5:
+            return
+        players = queue[:5]
+        quick_match_queues[guild_id] = queue[5:]
+
+    verified = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
+    everyone = guild.default_role
+
+    jtc_category = discord.utils.get(guild.categories, name=JOIN_TO_CREATE_CATEGORY)
+    if not jtc_category:
+        jtc_category = discord.utils.get(guild.categories, name="🎙 Голосовые комнаты")
+
+    overwrites = {
+        everyone: discord.PermissionOverwrite(view_channel=False, connect=False),
+    }
+    if verified:
+        overwrites[verified] = discord.PermissionOverwrite(view_channel=True, connect=False)
+    for p in players:
+        overwrites[p] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+
+    names = ", ".join(p.display_name for p in players)
+    vc = await guild.create_voice_channel(
+        f"⚡ Матч — {names}", category=jtc_category, user_limit=5,
+        overwrites=overwrites, reason="Быстрый матч")
+    storage.protect_voice_target(vc.id, guild.id, "voice")
+
+    try:
+        ch = discord.utils.get(guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
+        if ch:
+            embed = discord.Embed(
+                title="⚡ Матч собран!",
+                description=f"Комната: {vc.mention}\nУчастники: {names}",
+                color=0x8B4513)
+            await ch.send(embed=embed)
+    except Exception:
+        pass
+
+    for p in players:
+        try:
+            await p.move_to(vc)
+        except Exception:
+            pass
+
+
+# ---------------- 🐲 квест дня ----------------
+
+DAILY_QUEST_QUESTIONS = [
+    {"q": "Какой герой имеет самое высокое базовое здоровье?", "options": ["Pudge", "Mars", "Axe", "Abyssal Underlord"], "answer": 0},
+    {"q": "Сколько золота даёт убийство героя (базовая награда)?", "options": ["100", "200", "300", "400"], "answer": 2},
+    {"q": "Какой предмет даёт +5 секунд на каст?", "options": ["Aether Lens", "Octarine Core", "Kaya", "Blink Dagger"], "answer": 0},
+    {"q": "Кто из героев — Strength?", "options": ["Anti-Mage", "Sniper", "Huskar", "Invoker"], "answer": 2},
+    {"q": "Какой навык даёт невидимость на 5 секунд?", "options": ["Shadow Blade", "Silver Edge", "Glimmer Cape", "Blink Dagger"], "answer": 0},
+    {"q": "Сколько тир курьеров существует?", "options": ["2", "3", "4", "5"], "answer": 1},
+    {"q": "Какой предмет ломает крипов на 5?", "options": ["Battle Fury", "Maelstrom", "Radiance", "Shiva's Guard"], "answer": 0},
+    {"q": "Какой герой первым получил аркану?", "options": ["Crystal Maiden", "Juggernaut", "Pudge", "Faceless Void"], "answer": 0},
+    {"q": "Какой максимальный уровень героя?", "options": ["25", "30", "20", "35"], "answer": 0},
+    {"q": "Какой атрибут даёт +HP и +damage?", "options": ["Strength", "Agility", "Intelligence", "Все"], "answer": 0},
+    {"q": "Сколько секунд длится Glyph of Fortification?", "options": ["3", "5", "7", "10"], "answer": 2},
+    {"q": "Какой герой может летать по умолчанию?", "options": ["Batrider", "Jakiro", "Io", "Visage"], "answer": 2},
+    {"q": "Какой предмет даёт +100 к скорости атаки?", "options": ["Moon Shard", "Mjollnir", "Monkey King Bar", "Divine Rapier"], "answer": 0},
+    {"q": "Какой нейтральный кэмп даёт больше всего золота?", "options": ["Ancient", "Hard Camp", "Medium Camp", "Small Camp"], "answer": 0},
+    {"q": "Сколько стаков в башне?", "options": ["3", "4", "5", "6"], "answer": 1},
+    {"q": "Какой предмет возвращает ману?", "options": ["Linken's Sphere", "Lotus Orb", "Arcane Boots", "Bottle"], "answer": 2},
+    {"q": "Какой герой может стену ставить?", "options": ["Earthshaker", "Techies", "Pangolier", "Tusk"], "answer": 0},
+    {"q": "Какой эффект даёт Black King Bar?", "options": ["Spell Immunity", "Magic Resistance", "Stun", "Slow"], "answer": 0},
+    {"q": "Какой предмет даёт +200 к дальности заклинаний?", "options": ["Aether Lens", "Kaya and Sange", "Aghanim's Scepter", "Eul's Scepter"], "answer": 0},
+    {"q": "Какой герой может телепортироваться к союзнику?", "options": ["Io", "Keeper of the Light", "Nature's Prophet", "Четыре варианта"], "answer": 0},
+]
+
+
+class DailyQuestView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ответить на вопрос дня", emoji="🐲",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="daily_quest:answer")
+    async def answer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import hashlib
+        today = interaction.created_at.date().isoformat()
+        idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
+        q = DAILY_QUEST_QUESTIONS[idx]
+        view = DailyQuestAnswerView(idx, q["answer"])
+        options = [
+            discord.SelectOption(label=opt, value=str(i))
+            for i, opt in enumerate(q["options"])
+        ]
+        await interaction.response.send_message(
+            embed=discord.Embed(title="🐲 Вопрос дня", description=q["q"],
+                                color=0x8B4513),
+            view=view, ephemeral=True)
+
+
+class DailyQuestAnswerView(discord.ui.View):
+    def __init__(self, question_idx: int, correct_idx: int):
+        super().__init__(timeout=60)
+        self.correct_idx = correct_idx
+        options = [
+            discord.SelectOption(label=DAILY_QUEST_QUESTIONS[question_idx]["options"][i],
+                                 value=str(i))
+            for i in range(len(DAILY_QUEST_QUESTIONS[question_idx]["options"]))
+        ]
+        self.select = discord.ui.Select(placeholder="Выберите ответ", options=options)
+        self.select.callback = self.answer_callback
+        self.add_item(self.select)
+
+    async def answer_callback(self, interaction: discord.Interaction):
+        chosen = int(self.select.values[0])
+        if chosen == self.correct_idx:
+            role = await get_or_create_role(interaction.guild, DAILY_QUEST_ROLE_NAME)
+            member = interaction.user
+            if role not in member.roles:
+                await member.add_roles(role, reason="Правильный ответ на вопрос дня")
+            await interaction.response.send_message(
+                "✅ Правильно! Вы получили роль «🐲 Знаток дня».", ephemeral=True)
+        else:
+            correct = DAILY_QUEST_QUESTIONS[0]["options"][self.correct_idx]
+            await interaction.response.send_message(
+                f"❌ Неверно! Правильный ответ: **{correct}**.", ephemeral=True)
+        self.stop()
+
+
+# ---------------- 📺 стримы сервера ----------------
+
+class StreamButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Стримлю", emoji="📺",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="streams:toggle")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await get_or_create_role(interaction.guild, STREAMS_ROLE_NAME)
+        member = interaction.user
+        if role in member.roles:
+            await member.remove_roles(role, reason="Выключил стрим")
+            await interaction.response.send_message(
+                "📺 Стрим завершён — роль убрана.", ephemeral=True)
+        else:
+            await member.add_roles(role, reason="Начал стрим")
+            events_ch = discord.utils.get(interaction.guild.text_channels, name=STREAMS_CHANNEL)
+            if events_ch:
+                embed = discord.Embed(
+                    title="📺 Стрим!",
+                    description=f"{member.mention} начинает стримить!",
+                    color=0x8B4513)
+                await events_ch.send(content=role.mention, embed=embed)
+            await interaction.response.send_message(
+                "📺 Стрим начат! Роль «📺 Стример» выдана.", ephemeral=True)
+
+
+# ---------------- 📋 панель навигации ----------------
+
+class NavigationView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Навигация по серверу", emoji="📋",
+                        style=discord.ButtonStyle.success,
+                        custom_id="navigation:show")
+    async def show_nav(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📋 Навигация по серверу",
+            description="Все каналы и их назначение:",
+            color=0x8B4513)
+        embed.add_field(
+            name="📋 Начало",
+            value=(
+                "📜-правила — правила сервера\n"
+                "📢-объявления — новости и обновления\n"
+                "🔐-ВЕРИФИКАЦИЯ — привяжите Steam"
+            ),
+            inline=False)
+        embed.add_field(
+            name="⚔️ Арена",
+            value=(
+                "👋-приветствия — поздравления новичков\n"
+                "💬-чат — общение на темы Dota\n"
+                "🎉-ивенты — турниры и мероприятия"
+            ),
+            inline=False)
+        embed.add_field(
+            name="📊 Стратегия",
+            value=(
+                "🏆-лидерборд — топ игроков\n"
+                "🟢-кто-в-игре — кто сейчас играет\n"
+                "🧠-стратегия — аналитика и советы\n"
+                "📊-патчи — аналитика патчей"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🎮 Игровое",
+            value=(
+                "🔍-лфг — поиск пати\n"
+                "🐲-бестиарий — случайный герой"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🎙 Голосовые комнаты",
+            value=(
+                "🎮-создание-комнат — создайте войс\n"
+                "⚡ Быстрый матч — кнопка «Найти тиму»"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🛒 Магазин",
+            value="🛒-магазин — shards, бонусы, товары",
+            inline=False)
+        embed.set_footer(text="Все кнопки работают — просто нажмите!")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ---------------- cog ----------------
 
 class ServerManagement(commands.Cog):
@@ -848,6 +1129,8 @@ class ServerManagement(commands.Cog):
         self.weekly_meta_digest.start()
         self.daily_patch_digest.start()
         self.daily_verification_sweep.start()
+        self.daily_quest_post.start()
+        self.verify_reminder.start()
 
     def cog_unload(self):
         self.resync_ranks.cancel()
@@ -857,6 +1140,8 @@ class ServerManagement(commands.Cog):
         self.weekly_meta_digest.cancel()
         self.daily_patch_digest.cancel()
         self.daily_verification_sweep.cancel()
+        self.daily_quest_post.cancel()
+        self.verify_reminder.cancel()
 
     async def cog_load(self):
         self.bot.add_view(VerificationView(self.db))
@@ -868,6 +1153,10 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(GuestVoiceView(self.db))
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(VoiceReportView())
+        self.bot.add_view(QuickMatchView(self.db))
+        self.bot.add_view(DailyQuestView())
+        self.bot.add_view(StreamButtonView())
+        self.bot.add_view(NavigationView())
 
     # ---------- вход нового участника ----------
 
@@ -906,6 +1195,70 @@ class ServerManagement(commands.Cog):
 
     @daily_verification_sweep.before_loop
     async def before_verification_sweep(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- ежедневный квест дня ----------
+
+    @tasks.loop(time=DAILY_QUEST_TIME_UTC)
+    async def daily_quest_post(self):
+        import hashlib
+        today = discord.utils.utcnow().date().isoformat()
+        idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
+        q = DAILY_QUEST_QUESTIONS[idx]
+        for guild in self.bot.guilds:
+            ch = discord.utils.get(guild.text_channels, name=DAILY_QUEST_CHANNEL)
+            if not ch:
+                continue
+            embed = discord.Embed(
+                title="🐲 Вопрос дня",
+                description=q["q"],
+                color=0x8B4513)
+            options_text = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(q["options"]))
+            embed.add_field(name="Варианты:", value=options_text, inline=False)
+            embed.set_footer(text="Нажмите кнопку, чтобы ответить!")
+            try:
+                await ch.send(embed=embed, view=DailyQuestView())
+            except discord.HTTPException:
+                pass
+
+    @daily_quest_post.before_loop
+    async def before_daily_quest(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- напоминание о верификации (DM) ----------
+
+    @tasks.loop(hours=VERIFY_REMINDER_INTERVAL_HOURS)
+    async def verify_reminder(self):
+        for guild in self.bot.guilds:
+            unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+            if not unverified_role:
+                continue
+            verify_ch = discord.utils.get(guild.text_channels, name=VERIFICATION_CHANNEL)
+            if not verify_ch:
+                continue
+            for member in unverified_role.members:
+                if member.bot:
+                    continue
+                account_id = self.db.get_account_id(member.id)
+                if account_id is not None:
+                    continue
+                try:
+                    embed = discord.Embed(
+                        title="🔐 Верификация",
+                        description=(
+                            "Добро пожаловать на сервер Dota 2!\n\n"
+                            "Для получения доступа к каналам пройдите верификацию — "
+                            "привяжите свой Steam-аккаунт.\n\n"
+                            f"Перейдите в {verify_ch.mention} и нажмите кнопку."
+                        ),
+                        color=0x8B4513)
+                    await member.send(embed=embed)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                await asyncio.sleep(1)
+
+    @verify_reminder.before_loop
+    async def before_verify_reminder(self):
         await self.bot.wait_until_ready()
 
     # ---------- периодическая пересинхронизация рангов ----------
@@ -1523,6 +1876,26 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
+        # ---- ⚡ быстрый матч ----
+        qm_embed = discord.Embed(
+            title="⚡ Быстрый матч",
+            description=(
+                "Нажмите кнопку, чтобы найти тиму!\n\n"
+                "Когда соберётся 5 человек — бот создаст войс-комнату\n"
+                "и перенесёт всех туда."
+            ),
+            color=0x8B4513)
+        qm_pins = await vr_create.pins()
+        has_qm = any(
+            e.title == "⚡ Быстрый матч" for p in qm_pins if p.embeds
+            for e in [p.embeds[0]] if hasattr(e, 'title'))
+        if not has_qm:
+            qm_msg = await vr_create.send(embed=qm_embed, view=QuickMatchView(self.db))
+            try:
+                await qm_msg.pin()
+            except discord.Forbidden:
+                pass
+
         # ---- чаты для общения ----
         for ch_name in VOICE_ROOM_CHAT_CHANNELS:
             chat_ch = discord.utils.get(guild.text_channels, name=ch_name)
@@ -1620,6 +1993,45 @@ class ServerManagement(commands.Cog):
                 await post_pinned_info(ch, title, text, view=NotifyRoleView())
             else:
                 await post_pinned_info(ch, title, text)
+
+        # ---- 📋 навигация (в канал правил) ----
+        nav_ch = discord.utils.get(guild.text_channels, name=NAVIGATION_CHANNEL)
+        if nav_ch:
+            nav_embed = discord.Embed(
+                title="📋 Где что находится?",
+                description="Нажмите кнопку, чтобы увидеть полную карту сервера.",
+                color=0x8B4513)
+            nav_pins = await nav_ch.pins()
+            has_nav = any(
+                e.title == "📋 Где что находится?" for p in nav_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_nav:
+                nav_msg = await nav_ch.send(embed=nav_embed, view=NavigationView())
+                try:
+                    await nav_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- 📺 стримы (в ивенты) ----
+        events_ch = discord.utils.get(guild.text_channels, name=STREAMS_CHANNEL)
+        if events_ch:
+            stream_embed = discord.Embed(
+                title="📺 Стримы сервера",
+                description=(
+                    "Начали стрим? Нажмите кнопку — получите роль «📺 Стример» "
+                    "и вас увидят в этом канале!"
+                ),
+                color=0x8B4513)
+            ev_pins = await events_ch.pins()
+            has_stream = any(
+                e.title == "📺 Стримы сервера" for p in ev_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_stream:
+                stream_msg = await events_ch.send(embed=stream_embed, view=StreamButtonView())
+                try:
+                    await stream_msg.pin()
+                except discord.Forbidden:
+                    pass
 
         # ---- темы каналов (визуальное оформление) ----
         for ch_name, topic in CHANNEL_TOPICS.items():
