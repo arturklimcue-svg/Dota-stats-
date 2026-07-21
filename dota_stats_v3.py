@@ -2262,6 +2262,181 @@ class StrategyView(discord.ui.View):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ---------------- 📊 аналитика патчей ----------------
+
+def _trend_wr(hero: dict) -> list[float]:
+    """Возвращает список win-rate для каждого из последних 7 патчей (pub ranked)."""
+    picks = hero.get("pub_pick_trend", [])
+    wins = hero.get("pub_win_trend", [])
+    return [
+        (w / p * 100) if p else 0.0
+        for p, w in zip(picks, wins)
+    ]
+
+
+def _trend_pr(hero: dict, total_picks_per_patch: list[int]) -> list[float]:
+    """Возвращает pick-rate (%) героя относительно общего числа пиков за каждый патч."""
+    picks = hero.get("pub_pick_trend", [])
+    return [
+        (p / t * 100) if t else 0.0
+        for p, t in zip(picks, total_picks_per_patch)
+    ]
+
+
+class PatchAnalyticsView(discord.ui.View):
+    """Аналитика патчей — победители, проигравшие, растущие/падающие герои."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @staticmethod
+    def _compute_hero_deltas(stats: list[dict]):
+        """Считает дельты win-rate и pick-rate между двумя последними патчами."""
+        total_picks = [0] * 7
+        for h in stats:
+            for i, p in enumerate(h.get("pub_pick_trend", [0] * 7)):
+                total_picks[i] += p
+
+        results = []
+        for h in stats:
+            wr = _trend_wr(h)
+            pr = _trend_pr(h, total_picks)
+            if len(wr) < 2 or len(pr) < 2:
+                continue
+            wr_delta = wr[-1] - wr[-2]
+            pr_delta = pr[-1] - pr[-2]
+            pk_now = h.get("pub_pick_trend", [0])[-1]
+            if pk_now < 100:
+                continue
+            results.append({
+                "name": h["localized_name"],
+                "img": h.get("img", ""),
+                "wr_now": wr[-1],
+                "wr_prev": wr[-2],
+                "wr_delta": wr_delta,
+                "pr_now": pr[-1],
+                "pr_prev": pr[-2],
+                "pr_delta": pr_delta,
+                "pk_now": pk_now,
+            })
+        return results
+
+    @discord.ui.button(label="Победители", emoji="🏆", style=discord.ButtonStyle.success,
+                        custom_id="dota:patch_winners")
+    async def winners_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        deltas = self._compute_hero_deltas(stats)
+        top = sorted(deltas, key=lambda x: x["wr_delta"], reverse=True)[:10]
+        lines = []
+        for i, d in enumerate(top, 1):
+            sign = "+" if d["wr_delta"] >= 0 else ""
+            lines.append(
+                f"**{i}. {d['name']}** — WR {d['wr_now']:.1f}% "
+                f"({sign}{d['wr_delta']:.1f}%), пиков {d['pk_now']}")
+        embed = discord.Embed(
+            title="🏆 Топ победители патча (рост WR)",
+            description="\n".join(lines) or "Нет данных",
+            color=0x2ECC71)
+        embed.set_footer(text="Сравнение: текущий vs предыдущий патч (публичные ранговые)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Проигравшие", emoji="📉", style=discord.ButtonStyle.danger,
+                        custom_id="dota:patch_losers")
+    async def losers_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        deltas = self._compute_hero_deltas(stats)
+        top = sorted(deltas, key=lambda x: x["wr_delta"])[:10]
+        lines = []
+        for i, d in enumerate(top, 1):
+            sign = "+" if d["wr_delta"] >= 0 else ""
+            lines.append(
+                f"**{i}. {d['name']}** — WR {d['wr_now']:.1f}% "
+                f"({sign}{d['wr_delta']:.1f}%), пиков {d['pk_now']}")
+        embed = discord.Embed(
+            title="📉 Топ проигравшие патча (падение WR)",
+            description="\n".join(lines) or "Нет данных",
+            color=0xE74C3C)
+        embed.set_footer(text="Сравнение: текущий vs предыдущий патч (публичные ранговые)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Растущие", emoji="📈", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:patch_rising")
+    async def rising_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        deltas = self._compute_hero_deltas(stats)
+        top = sorted(deltas, key=lambda x: x["pr_delta"], reverse=True)[:10]
+        lines = []
+        for i, d in enumerate(top, 1):
+            sign = "+" if d["pr_delta"] >= 0 else ""
+            lines.append(
+                f"**{i}. {d['name']}** — pick-rate {d['pr_now']:.2f}% "
+                f"({sign}{d['pr_delta']:.2f}%), WR {d['wr_now']:.1f}%")
+        embed = discord.Embed(
+            title="📈 Растущие герои (рост пикрейта)",
+            description="\n".join(lines) or "Нет данных",
+            color=0x3498DB)
+        embed.set_footer(text="Сравнение: текущий vs предыдущий патч (публичные ранговые)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Падающие", emoji="⬇️", style=discord.ButtonStyle.secondary,
+                        custom_id="dota:patch_falling")
+    async def falling_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        deltas = self._compute_hero_deltas(stats)
+        top = sorted(deltas, key=lambda x: x["pr_delta"])[:10]
+        lines = []
+        for i, d in enumerate(top, 1):
+            sign = "+" if d["pr_delta"] >= 0 else ""
+            lines.append(
+                f"**{i}. {d['name']}** — pick-rate {d['pr_now']:.2f}% "
+                f"({sign}{d['pr_delta']:.2f}%), WR {d['wr_now']:.1f}%")
+        embed = discord.Embed(
+            title="⬇️ Падающие герои (снижение пикрейта)",
+            description="\n".join(lines) or "Нет данных",
+            color=0x95A5A6)
+        embed.set_footer(text="Сравнение: текущий vs предыдущий патч (публичные ранговые)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Текущая мета", emoji="🔥", style=discord.ButtonStyle.primary,
+                        custom_id="dota:patch_meta")
+    async def meta_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        stats = await od.hero_stats()
+        total_picks = [0] * 7
+        for h in stats:
+            for i, p in enumerate(h.get("pub_pick_trend", [0] * 7)):
+                total_picks[i] += p
+        heroes = []
+        for h in stats:
+            pk = h.get("pub_pick_trend", [0])[-1]
+            if pk < 200:
+                continue
+            wr = _trend_wr(h)
+            pr = _trend_pr(h, total_picks)
+            heroes.append({
+                "name": h["localized_name"],
+                "pk": pk,
+                "wr": wr[-1] if wr else 0,
+                "pr": pr[-1] if pr else 0,
+            })
+        top_wr = sorted(heroes, key=lambda x: x["wr"], reverse=True)[:5]
+        top_pk = sorted(heroes, key=lambda x: x["pk"], reverse=True)[:5]
+        lines_wr = []
+        for i, d in enumerate(top_wr, 1):
+            lines_wr.append(f"**{i}. {d['name']}** — WR {d['wr']:.1f}%, пиков {d['pk']}")
+        lines_pk = []
+        for i, d in enumerate(top_pk, 1):
+            lines_pk.append(f"**{i}. {d['name']}** — WR {d['wr']:.1f}%, пиков {d['pk']}")
+        embed = discord.Embed(title="🔥 Текущая мета", color=0xE67E22)
+        embed.add_field(name="🏆 Топ по Win Rate", value="\n".join(lines_wr) or "—", inline=True)
+        embed.add_field(name="🎯 Топ по Pick Rate", value="\n".join(lines_pk) or "—", inline=True)
+        embed.set_footer(text="Публичные ранговые матчи, текущий патч")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 class ShopView(discord.ui.View):
     """Shards + бонус + магазин — в канале магазина."""
     def __init__(self, db: Storage):
@@ -2846,6 +3021,7 @@ class DotaStats(commands.Cog):
         self.bot.add_view(ProfileView(self.db))
         self.bot.add_view(CompetitionView(self.db))
         self.bot.add_view(StrategyView(self.db))
+        self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(ShopView(self.db))
         # переподключаем кнопки активных дуэлей после рестарта бота —
         # custom_id зашит в duel_id, поэтому старые сообщения снова оживают

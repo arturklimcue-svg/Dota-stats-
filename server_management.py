@@ -35,7 +35,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands, tasks
 
-from dota_stats_v3 import od, to_account_id, to_steam64, Storage, DB_PATH
+from dota_stats_v3 import od, to_account_id, to_steam64, Storage, DB_PATH, PatchAnalyticsView
 
 # ---------------- конфиг ----------------
 
@@ -68,7 +68,7 @@ COMMUNITY_TEXT_CHANNELS = ["👋-приветствия", "💬-общий-ча�
                            "🎬-клипы-и-фейлы", "😂-мемы", "🎉-ивенты", SHOP_CHANNEL]
 
 STRATEGY_CATEGORY = "📊 Стратегия"
-STRATEGY_TEXT_CHANNELS = ["🏆-лидерборд", "🟢-кто-в-игре", "🧠-советы-и-стратегии"]
+STRATEGY_TEXT_CHANNELS = ["🏆-лидерборд", "🟢-кто-в-игре", "🧠-советы-и-стратегии", PATCH_ANALYTICS_CHANNEL]
 
 GAME_CATEGORY = "🎮 Игровое"
 LFG_CHANNEL = "🔍-лфг"
@@ -141,8 +141,12 @@ NOTIFY_ROLE_NAME = "🔔 Уведомления"
 WEEKLY_META_TIME_UTC = dt_time(hour=10, minute=0)
 WEEKLY_META_CHANNEL = "📢-объявления"
 
+# 📊 аналитика патчей — ежедневный дайджест изменений меты
+PATCH_ANALYTICS_CHANNEL = "📊-аналитика-патчей"
+PATCH_ANALYTICS_TIME_UTC = dt_time(hour=11, minute=0)
+
 # 🔇 каналы, где обычным участникам нельзя писать текст — только кнопки/модалки бота
-READ_ONLY_CHANNELS = ["🧠-советы-и-стратегии", "🏆-лидерборд", STATUS_BOARD_CHANNEL, SHOP_CHANNEL]
+READ_ONLY_CHANNELS = ["🧠-советы-и-стратегии", "🏆-лидерборд", STATUS_BOARD_CHANNEL, SHOP_CHANNEL, PATCH_ANALYTICS_CHANNEL]
 
 # 🧹 автоочистка чатов внутри КАЖДОЙ ранговой категории (все они называются
 # одинаково "⚔-чат", поэтому чистятся не по имени, а перебором категорий)
@@ -165,6 +169,7 @@ CHANNEL_TOPICS = {
     "🧠-советы-и-стратегии": "Панель статистики и стратегий — только кнопки, без текста",
     "🐲-бестиарий-героев": "Обсуждение героев, их сильных и слабых сторон",
     "🛒-магазин": "Магазин shards: ежедневный бонус, товары и баланс",
+    PATCH_ANALYTICS_CHANNEL: "Аналитика патчей: победители, проигравшие, мета — кнопки, без флуда",
 }
 
 # ---- закреплённые сообщения: канал -> (заголовок, текст) ----
@@ -706,6 +711,7 @@ class ServerManagement(commands.Cog):
         self.update_stats_channels.start()
         self.hero_of_the_day.start()
         self.weekly_meta_digest.start()
+        self.daily_patch_digest.start()
         self.daily_verification_sweep.start()
 
     def cog_unload(self):
@@ -714,6 +720,7 @@ class ServerManagement(commands.Cog):
         self.update_stats_channels.cancel()
         self.hero_of_the_day.cancel()
         self.weekly_meta_digest.cancel()
+        self.daily_patch_digest.cancel()
         self.daily_verification_sweep.cancel()
 
     async def cog_load(self):
@@ -723,6 +730,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(HeroRollView())
         self.bot.add_view(NotifyRoleView())
         self.bot.add_view(VoiceRoomCreateView(self.db))
+        self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(VoiceReportView())
 
     # ---------- вход нового участника ----------
@@ -957,6 +965,65 @@ class ServerManagement(commands.Cog):
     async def before_weekly_meta(self):
         await self.bot.wait_until_ready()
 
+    @tasks.loop(time=PATCH_ANALYTICS_TIME_UTC)
+    async def daily_patch_digest(self):
+        for guild in self.bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name=PATCH_ANALYTICS_CHANNEL)
+            if not channel:
+                continue
+            stats = await od.hero_stats()
+            if not stats:
+                continue
+
+            from dota_stats_v3 import _trend_wr, _trend_pr
+
+            total_picks = [0] * 7
+            for h in stats:
+                for i, p in enumerate(h.get("pub_pick_trend", [0] * 7)):
+                    total_picks[i] += p
+
+            deltas = []
+            for h in stats:
+                wr = _trend_wr(h)
+                pr = _trend_pr(h, total_picks)
+                if len(wr) < 2:
+                    continue
+                pk_now = h.get("pub_pick_trend", [0])[-1]
+                if pk_now < 100:
+                    continue
+                deltas.append({
+                    "name": h["localized_name"],
+                    "wr_now": wr[-1],
+                    "wr_delta": wr[-1] - wr[-2],
+                    "pr": pr[-1] if pr else 0,
+                    "pk_now": pk_now,
+                })
+
+            winners = sorted(deltas, key=lambda x: x["wr_delta"], reverse=True)[:3]
+            losers = sorted(deltas, key=lambda x: x["wr_delta"])[:3]
+
+            lines = ["**🏆 Winners:**"]
+            for d in winners:
+                sign = "+" if d["wr_delta"] >= 0 else ""
+                lines.append(f"  {d['name']} — WR {d['wr_now']:.1f}% ({sign}{d['wr_delta']:.1f}%)")
+            lines.append("\n**📉 Losers:**")
+            for d in losers:
+                sign = "+" if d["wr_delta"] >= 0 else ""
+                lines.append(f"  {d['name']} — WR {d['wr_now']:.1f}% ({sign}{d['wr_delta']:.1f}%)")
+
+            embed = discord.Embed(
+                title="📊 Аналитика патча: кто выиграл, кто проиграл",
+                description="\n".join(lines),
+                color=0x8B4513)
+            embed.set_footer(text="Ежедневный дайджест • Публичные ранговые матчи")
+            notify_role = discord.utils.get(guild.roles, name=NOTIFY_ROLE_NAME)
+            content = notify_role.mention if notify_role else None
+            await channel.send(content=content, embed=embed)
+
+    @daily_patch_digest.before_loop
+    async def before_daily_patch(self):
+        await self.bot.wait_until_ready()
+
     # ---------- 🏆 лидерборд ----------
 
     @commands.command(name="leaderboard")
@@ -965,6 +1032,31 @@ class ServerManagement(commands.Cog):
         async with ctx.typing():
             embed = await build_leaderboard_embed(self.db, ctx.guild)
         await ctx.send(embed=embed)
+
+    # ---------- 📊 аналитика патчей ----------
+
+    @commands.command(name="dota_patch_panel")
+    @commands.has_permissions(manage_messages=True)
+    async def patch_panel(self, ctx: commands.Context):
+        """Закрепляет панель аналитики патчей в текущем канале."""
+        embed = discord.Embed(
+            title="📊 Аналитика патчей",
+            description=(
+                "Нажмите кнопку ниже, чтобы узнать, какие герои выиграли/проиграли "
+                "в последнем обновлении.\n\n"
+                "**Победители** — кто получил больше WR\n"
+                "**Проигравшие** — кто потерял больше WR\n"
+                "**Растущие** — чей пикрейт вырос\n"
+                "**Падающие** — чей пикрейт упал\n"
+                "**Текущая мета** — топ герои прямо сейчас"
+            ),
+            color=0x8B4513)
+        msg = await ctx.send(embed=embed, view=PatchAnalyticsView())
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            pass
+        await ctx.send("✅ Панель аналитики патчей закреплена!", delete_after=5)
 
     # ---------- проверка базы привязанных игроков ----------
 
