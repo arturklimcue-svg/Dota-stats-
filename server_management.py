@@ -432,10 +432,20 @@ class VerifyModal(discord.ui.Modal, title="Верификация — привя
             note = ("\n\n(Ранг не определился — либо матчи скрыты в настройках приватности "
                     "Steam/Dota, либо статистика ещё не синхронизировалась. Роль обновится "
                     "автоматически при следующей синхронизации.)")
-        await interaction.response.send_message(
-            f"Готово! Привязал вас к **{persona}**, выдал роль **{rank_role_name}**. "
-            f"Добро пожаловать на сервер.{note}",
-            ephemeral=True)
+
+        # приветствие с картой сервера
+        welcome_text = (
+            f"Готово! Привязал вас к **{persona}**, выдал роль **{rank_role_name}**.{note}\n\n"
+            "**📋 Где что находится:**\n\n"
+            "**📋 Начало** — правила, объявления, навигация\n"
+            "**⚔️ Арена** — общение: чат, ивенты, приветствия\n"
+            "**📊 Стратегия** — лидерборд, аналитика, патчи\n"
+            "**🎮 Игровое** — поиск пати, бестиарий\n"
+            "**🎙 Голосовые** — создайте войс-комнату или нажмите «Быстрый матч»\n"
+            "**🛒 Магазин** — shards, бонусы, товары\n\n"
+            "Все каналы работают через **кнопки** — просто нажмите!"
+        )
+        await interaction.response.send_message(welcome_text, ephemeral=True)
 
         log_ch = discord.utils.get(guild.text_channels, name=MOD_LOG_CHANNEL)
         if log_ch:
@@ -970,6 +980,26 @@ DAILY_QUEST_QUESTIONS = [
     {"q": "Какой эффект даёт Black King Bar?", "options": ["Spell Immunity", "Magic Resistance", "Stun", "Slow"], "answer": 0},
     {"q": "Какой предмет даёт +200 к дальности заклинаний?", "options": ["Aether Lens", "Kaya and Sange", "Aghanim's Scepter", "Eul's Scepter"], "answer": 0},
     {"q": "Какой герой может телепортироваться к союзнику?", "options": ["Io", "Keeper of the Light", "Nature's Prophet", "Четыре варианта"], "answer": 0},
+    {"q": "Какой предмет даёт +40 к урону и ломает крипов?", "options": ["Battle Fury", "Maelstrom", "Daedalus", "Desolator"], "answer": 0},
+    {"q": "Сколько золота стоит Observer Ward?", "options": ["0", "25", "50", "75"], "answer": 0},
+    {"q": "Какой герой может ставить ловушки?", "options": ["Techies", "Sniper", "Troll Warlord", "Windranger"], "answer": 0},
+    {"q": "Какой предмет даёт +25 к всем атрибутам?", "options": ["Ultimate Orb", "Skadi", "Manta Style", "Eye of Skadi"], "answer": 0},
+    {"q": "Какой навык даёт +100 к скорости передвижения?", "options": ["Surge", "Haste", "Phase Boots", "Yasha"], "answer": 0},
+    {"q": "Какой герой может создавать копию себя?", "options": ["Terrorblade", "Phantom Lancer", "Naga Siren", "Chaos Knight"], "answer": 0},
+    {"q": "Какой предмет даёт +40 к скорости атаки?", "options": ["Hyperstone", "Maelstrom", "Monkey King Bar", "Divine Rapier"], "answer": 0},
+    {"q": "Какой герой может невидимость союзникам?", "options": ["Shadow Demon", "Oracle", "Nyx Assassin", "Riki"], "answer": 2},
+    {"q": "Сколько секунд кулдаун у Buyback на макс. уровне?", "options": ["60", "90", "120", "180"], "answer": 1},
+    {"q": "Какой предмет даёт +30 к броне?", "options": ["Assault Cuirass", "Shiva's Guard", "Pipe of Insight", "Crimson Guard"], "answer": 0},
+    {"q": "Какой герой может телепортироваться в любую точку карты?", "options": ["Nature's Prophet", "Io", "Keeper of the Light", "Storm Spirit"], "answer": 0},
+    {"q": "Какой предмет даёт +50% к крипам?", "options": ["Hand of Midas", "Battle Fury", "Maelstrom", "Radiance"], "answer": 0},
+    {"q": "Какой герой может тянуть врагов к себе?", "options": ["Pudge", "Clockwerk", "Batrider", "Vengeful Spirit"], "answer": 0},
+    {"q": "Какой предмет даёт +20 к всем характеристикам?", "options": ["Skadi", "Manta Style", "Eye of Skadi", "Butterfly"], "answer": 0},
+    {"q": "Какой герой может ставить тотемы?", "options": ["Earthshaker", "Ogre Magi", "Shadow Shaman", "Jakiro"], "answer": 0},
+    {"q": "Какой предмет даёт +100 к урону?", "options": ["Divine Rapier", "MKB", "Daedalus", "Desolator"], "answer": 0},
+    {"q": "Какой герой может становиться невидимым?", "options": ["Riki", "Clinkz", "Weaver", "Все три"], "answer": 3},
+    {"q": "Сколько золота даёт убийство крипа melee?", "options": ["36-42", "40-46", "44-50", "48-54"], "answer": 0},
+    {"q": "Какой предмет даёт +35 к урону?", "options": ["Maelstrom", "Desolator", "Monkey King Bar", "Daedalus"], "answer": 0},
+    {"q": "Какой герой может ставить башни?", "options": ["Shadow Shaman", "Techies", "Nature's Prophet", "Jakiro"], "answer": 0},
 ]
 
 
@@ -1115,99 +1145,6 @@ class NavigationView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ---------------- ⚡ стак-сбор (роль + ранг) ----------------
-
-STACK_ROLES = {
-    "carry": "🛡 Кэрри",
-    "support": "💚 Саппорт",
-    "offlane": "⚔️ Офлейн",
-    "mid": "🎯 Мид",
-    "any": "🎲 Любая роль",
-}
-
-STACK_RANKS = {
-    "any": "🎯 Любой ранг",
-    "herald": "1️⃣ Herald",
-    "guardian": "2️⃣ Guardian",
-    "crusader": "3️⃣ Crusader",
-    "archon": "4️⃣ Archon",
-    "legend": "5️⃣ Legend",
-    "ancient": "6️⃣ Ancient",
-    "divine": "7️⃣ Divine",
-    "immortal": "8️⃣ Immortal",
-}
-
-
-class StackGatherView(discord.ui.View):
-    def __init__(self, db: Storage):
-        super().__init__(timeout=None)
-        self.db = db
-
-    @discord.ui.button(label="Собрать стак", emoji="⚡",
-                        style=discord.ButtonStyle.success,
-                        custom_id="stack:start")
-    async def stack_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = StackSetupView(self.db)
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="⚡ Собрать стак",
-                description="Выберите свою роль и ранг:",
-                color=0x8B4513),
-            view=view, ephemeral=True)
-
-
-class StackSetupView(discord.ui.View):
-    def __init__(self, db: Storage):
-        super().__init__(timeout=60)
-        self.db = db
-        self.chosen_role = "any"
-        self.chosen_rank = "any"
-
-    @discord.ui.select(
-        placeholder="Ваша роль",
-        options=[discord.SelectOption(label=v, value=k) for k, v in STACK_ROLES.items()],
-        row=0)
-    async def role_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.chosen_role = select.values[0]
-        await interaction.response.defer()
-        await interaction.message.edit(
-            embed=discord.Embed(
-                title="⚡ Собрать стак",
-                description=f"**Роль:** {STACK_ROLES[self.chosen_role]}\n**Ранг:** {STACK_RANKS[self.chosen_rank]}\n\nНажмите «Найти» чтобы начать поиск.",
-                color=0x8B4513), view=self)
-
-    @discord.ui.select(
-        placeholder="Ваш ранг",
-        options=[discord.SelectOption(label=v, value=k) for k, v in STACK_RANKS.items()],
-        row=1)
-    async def rank_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.chosen_rank = select.values[0]
-        await interaction.response.defer()
-        await interaction.message.edit(
-            embed=discord.Embed(
-                title="⚡ Собрать стак",
-                description=f"**Роль:** {STACK_ROLES[self.chosen_role]}\n**Ранг:** {STACK_RANKS[self.chosen_rank]}\n\nНажмите «Найти» чтобы начать поиск.",
-                color=0x8B4513), view=self)
-
-    @discord.ui.button(label="Найти", emoji="🔍",
-                        style=discord.ButtonStyle.success, row=2)
-    async def find_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.db.stack_join(interaction.guild_id, interaction.user.id,
-                           self.chosen_role, self.chosen_rank)
-        queue = self.db.stack_get_queue(interaction.guild_id)
-        if len(queue) >= 5:
-            await _start_quick_match(interaction.guild, self.db)
-            self.db.stack_clear(interaction.guild_id)
-            await interaction.response.send_message(
-                "⚡ Стак собран! Комната создана.", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                f"⚡ Вы в очереди! Сейчас ищет: {len(queue)}/5\n"
-                f"Роль: {STACK_ROLES[self.chosen_role]} | Ранг: {STACK_RANKS[self.chosen_rank]}",
-                ephemeral=True)
-        self.stop()
-
-
 # ---------------- 📊 мои матчи ----------------
 
 class MyMatchesView(discord.ui.View):
@@ -1315,6 +1252,18 @@ DAILY_POLL_QUESTIONS = [
     {"q": "Какой предмет даёт True Sight?", "options": ["Dust", "Sentry Ward", "Observer Ward", "Gem"]},
     {"q": "Самый сильный герой в лейте?", "options": ["Anti-Mage", "Spectre", "Faceless Void", "Phantom Lancer"]},
     {"q": "Какой нейтральный предмет Tier 5 лучший?", "options": ["Pirate Hat", "Giant's Ring", "Book of the Dead", "Mirror Shield"]},
+    {"q": "Какой ролью легче всего поднять MMR?", "options": ["Кэрри", "Мид", "Офлейн", "Саппорт"]},
+    {"q": "Лучший бан в рейтинге сейчас?", "options": ["Pudge", "Invoker", "Meepo", "Phantom Assassin"]},
+    {"q": "Стоит ли.buyback早早早?", "options": ["Да, всегда", "Только в лейте", "Нет, экономлю", "Зависит от ситуации"]},
+    {"q": "Какой кэмп лучше стакать?", "options": ["Ancient", "Hard", "Medium", "Neutrals"]},
+    {"q": "Лучший предмет первого тира?", "options": ["Fairy's Trinket", "Seer Stone", "Unwavering Condition", "Mind Breaker"]},
+    {"q": "Самый переоценённый герой?", "options": ["Pudge", "Invoker", "Anti-Mage", "Techies"]},
+    {"q": "Какой герой самый fun?", "options": ["Techies", "Invoker", "Pudge", "Meepo"]},
+    {"q": "Стоит ли покупать Gem?", "options": ["Да, против невидимых", "Нет, слишком дорого", "Только саппорту", "Зависит от игры"]},
+    {"q": "Лучшая стратегия в лейте?", "options": ["5м пуш", "Сплитпуш", "Ратт", "Дождаться BKB"]},
+    {"q": "Какой герой лучше для новичков?", "options": ["Wraith King", "Dragon Knight", "Sniper", "Drow Ranger"]},
+    {"q": "Стоит ли покупать wards?", "options": ["Да, всегда", "Только саппорту", "Нет, башня даёт", "Зависит от ранга"]},
+    {"q": "Какой сервер лучше для Европы?", "options": ["EU West", "EU East", "Russia", "SEA"]},
 ]
 
 
@@ -1542,7 +1491,6 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(DailyQuestView())
         self.bot.add_view(StreamButtonView())
         self.bot.add_view(NavigationView())
-        self.bot.add_view(StackGatherView(self.db))
         self.bot.add_view(MyMatchesView(self.db))
         self.bot.add_view(MentorView(self.db))
         self.bot.add_view(MentorListView())
@@ -1684,10 +1632,12 @@ class ServerManagement(commands.Cog):
 
     # ---------- напоминание о турнире ----------
 
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=15)
     async def tournament_reminder(self):
         from datetime import datetime as dt, timezone
         now = dt.now(timezone.utc)
+        if not hasattr(self, '_reminded_matches'):
+            self._reminded_matches: set[str] = set()
         for guild in self.bot.guilds:
             active = self.db.conn.execute(
                 "SELECT id, name FROM tournaments WHERE guild_id=? AND status='active'",
@@ -1697,6 +1647,10 @@ class ServerManagement(commands.Cog):
                     "SELECT player1_id, player2_id, status FROM tournament_matches "
                     "WHERE tournament_id=? AND status='pending'", (tid,)).fetchall()
                 for p1, p2, _ in matches:
+                    key = f"{tid}:{p1}:{p2}"
+                    if key in self._reminded_matches:
+                        continue
+                    self._reminded_matches.add(key)
                     for pid in [p1, p2]:
                         if not pid:
                             continue
@@ -2447,24 +2401,6 @@ class ServerManagement(commands.Cog):
             else:
                 await post_pinned_info(ch, title, text)
 
-        # ---- ⚡ стак-сбор (в лфг) ----
-        lfg_ch = discord.utils.get(guild.text_channels, name=LFG_CHANNEL)
-        if lfg_ch:
-            stack_embed = discord.Embed(
-                title="⚡ Собрать стак",
-                description="Нажмите, чтобы найти тиму по роли и рангу.",
-                color=0x8B4513)
-            lfg_pins = await lfg_ch.pins()
-            has_stack = any(
-                e.title == "⚡ Собрать стак" for p in lfg_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_stack:
-                stack_msg = await lfg_ch.send(embed=stack_embed, view=StackGatherView(self.db))
-                try:
-                    await stack_msg.pin()
-                except discord.Forbidden:
-                    pass
-
         # ---- 📊 мои матчи (в лидерборд) ----
         lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
         if lb_ch:
@@ -2529,30 +2465,34 @@ class ServerManagement(commands.Cog):
                 except discord.Forbidden:
                     pass
 
-        # ---- ⚠️ модерация кнопки (в mod-log) ----
-        mod_ch = discord.utils.get(guild.text_channels, name=MOD_LOG_CHANNEL)
-        if mod_ch:
-            mod_embed = discord.Embed(
-                title="🛠 Панель модерации",
-                description="Используйте кнопки ниже для предупреждений и таймаутов.",
-                color=0xFF0000)
-            mod_pins = await mod_ch.pins()
-            has_mod_btn = any(
-                e.title == "🛠 Панель модерации" for p in mod_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_mod_btn:
-                mod_view = discord.ui.View()
-                mod_view.add_item(discord.ui.Button(
-                    label="Предупредить", emoji="⚠️",
-                    style=discord.ButtonStyle.danger, custom_id="mod:warning"))
-                mod_view.add_item(discord.ui.Button(
-                    label="Таймаут", emoji="🔇",
-                    style=discord.ButtonStyle.danger, custom_id="mod:timeout"))
-                mod_msg = await mod_ch.send(embed=mod_embed, view=mod_view)
-                try:
-                    await mod_msg.pin()
-                except discord.Forbidden:
-                    pass
+        # ---- ⚠️ модерация кнопки (staff-only канал) ----
+        mod_tools_ch = discord.utils.get(guild.text_channels, name="🛠-инструменты")
+        if not mod_tools_ch:
+            mod_tools_ch = await guild.create_text_channel("🛠-инструменты", category=staff_category)
+        if staff_role:
+            await mod_tools_ch.set_permissions(staff_role, view_channel=True, send_messages=True)
+        await mod_tools_ch.set_permissions(everyone, view_channel=False)
+        mod_embed = discord.Embed(
+            title="🛠 Панель модерации",
+            description="Используйте кнопки ниже для предупреждений и таймаутов.",
+            color=0xFF0000)
+        mod_pins = await mod_tools_ch.pins()
+        has_mod_btn = any(
+            e.title == "🛠 Панель модерации" for p in mod_pins if p.embeds
+            for e in [p.embeds[0]] if hasattr(e, 'title'))
+        if not has_mod_btn:
+            mod_view = discord.ui.View()
+            mod_view.add_item(discord.ui.Button(
+                label="Предупредить", emoji="⚠️",
+                style=discord.ButtonStyle.danger, custom_id="mod:warning"))
+            mod_view.add_item(discord.ui.Button(
+                label="Таймаут", emoji="🔇",
+                style=discord.ButtonStyle.danger, custom_id="mod:timeout"))
+            mod_msg = await mod_tools_ch.send(embed=mod_embed, view=mod_view)
+            try:
+                await mod_msg.pin()
+            except discord.Forbidden:
+                pass
 
         # ---- 📋 навигация (в канал правил) ----
         nav_ch = discord.utils.get(guild.text_channels, name=NAVIGATION_CHANNEL)

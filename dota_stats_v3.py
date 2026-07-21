@@ -669,16 +669,6 @@ class Storage:
             created_at TEXT NOT NULL
         )""")
 
-        # --- стак-сбор (быстрый матч) ---
-        c.execute("""CREATE TABLE IF NOT EXISTS stack_gather (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            discord_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            rank TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )""")
-
         c.commit()
 
     def register(self, discord_id: int, account_id: int, steam_id64: int):
@@ -940,34 +930,6 @@ class Storage:
 
     def remove_warning(self, warning_id: int):
         self.conn.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
-        self.conn.commit()
-
-    # ==================== стак-сбор ====================
-
-    def stack_join(self, guild_id: int, discord_id: int, role: str, rank: str):
-        self.conn.execute(
-            "DELETE FROM stack_gather WHERE guild_id=? AND discord_id=?",
-            (guild_id, discord_id))
-        self.conn.execute(
-            "INSERT INTO stack_gather (guild_id, discord_id, role, rank, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (guild_id, discord_id, role, rank,
-             datetime.now(timezone.utc).isoformat()))
-        self.conn.commit()
-
-    def stack_leave(self, guild_id: int, discord_id: int):
-        self.conn.execute(
-            "DELETE FROM stack_gather WHERE guild_id=? AND discord_id=?",
-            (guild_id, discord_id))
-        self.conn.commit()
-
-    def stack_get_queue(self, guild_id: int) -> list[tuple]:
-        return self.conn.execute(
-            "SELECT discord_id, role, rank FROM stack_gather WHERE guild_id=?",
-            (guild_id,)).fetchall()
-
-    def stack_clear(self, guild_id: int):
-        self.conn.execute("DELETE FROM stack_gather WHERE guild_id=?", (guild_id,))
         self.conn.commit()
 
     # ==================== достижения ====================
