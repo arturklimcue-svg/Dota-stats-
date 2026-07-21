@@ -3755,9 +3755,47 @@ class DotaStats(commands.Cog):
                           f"отдельный канал для игры и зрителей."),
             color=0xE67E22)
         embed.add_field(name="Дедлайн", value=f"<t:{int(deadline.timestamp())}:R>")
-        view = DuelOfferView(self.db, duel_id)
-        msg = await channel.send(content=f"<@{p1_id}> <@{p2_id}>", embed=embed, view=view)
-        self.db.set_offer_message(duel_id, msg.channel.id, msg.id)
+
+        # публичное объявление БЕЗ кнопок — просто анонс
+        await channel.send(
+            content=f"<@{p1_id}> <@{p2_id}>",
+            embed=embed)
+
+        # приватные приглашения с кнопками — каждому игроку отдельно
+        p1_member = guild.get_member(p1_id)
+        p2_member = guild.get_member(p2_id)
+
+        offer_embed_p1 = discord.Embed(
+            title="⚔️ Вам бросили вызов!",
+            description=(
+                f"Вас вызывает **{p2_name}** на дуэль!\n\n"
+                f"Дедлайн: <t:{int(deadline.timestamp())}:R>\n\n"
+                "Нажмите кнопку ниже, чтобы принять или отклонить."
+            ),
+            color=0xE67E22)
+        offer_embed_p2 = discord.Embed(
+            title="⚔️ Вам бросили вызов!",
+            description=(
+                f"Вас вызывает **{p1_name}** на дуэль!\n\n"
+                f"Дедлайн: <t:{int(deadline.timestamp())}:R>\n\n"
+                "Нажмите кнопку ниже, чтобы принять или отклонить."
+            ),
+            color=0xE67E22)
+
+        view1 = DuelOfferView(self.db, duel_id)
+        view2 = DuelOfferView(self.db, duel_id)
+
+        if p1_member:
+            try:
+                msg1 = await p1_member.send(embed=offer_embed_p1, view=view1)
+                self.db.set_offer_message(duel_id, msg1.channel.id, msg1.id)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        if p2_member:
+            try:
+                msg2 = await p2_member.send(embed=offer_embed_p2, view=view2)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     async def update_offer_message(self, duel_id: int):
         """Перерисовывает embed оффера после отклонения/истечения — оставляет
