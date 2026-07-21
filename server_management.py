@@ -553,15 +553,26 @@ class NotifyRoleView(discord.ui.View):
 
 # ---------------- 🎙 создание голосовых комнат с выбором параметров ----------------
 
+RANK_LABELS = {
+    "herald": "Herald", "guardian": "Guardian", "crusader": "Crusader",
+    "archon": "Archon", "legend": "Legend", "ancient": "Ancient",
+    "divine": "Divine", "immortal": "Immortal", "any": "Любой ранг",
+}
+
+
 class VoiceRoomModal(discord.ui.Modal, title="Создать голосовую комнату"):
     size = discord.ui.TextInput(
         label="Размер (2–10)", placeholder="напр. 5", max_length=2, default="5")
     mode = discord.ui.TextInput(
         label="Режим: ranked / turbo / lp / unranked", placeholder="ranked",
         max_length=10, default="ranked")
+    rank = discord.ui.TextInput(
+        label="Ранг (herald/guardian/.../immortal/any)", placeholder="any",
+        max_length=10, default="any")
 
-    def __init__(self):
+    def __init__(self, db: Storage):
         super().__init__()
+        self.db = db
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -574,27 +585,41 @@ class VoiceRoomModal(discord.ui.Modal, title="Создать голосовую 
             mode = "unranked"
         mode_label = GAME_MODE_NAMES[mode]
 
+        rank_raw = str(self.rank.value).lower().strip()
+        rank_label = RANK_LABELS.get(rank_raw, "Любой ранг")
+
         member = interaction.user
         category = interaction.channel.category
-        ch_name = f"🎙 {member.display_name} ({mode_label} • {size})"
+        ch_name = f"🎙 {member.display_name} ({mode_label} • {rank_label} • {size})"
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True),
+            member: discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True, manage_channels=True),
+            interaction.guild.me: discord.PermissionOverwrite(
+                view_channel=True, connect=True, manage_channels=True),
+        }
         temp = await member.guild.create_voice_channel(
             name=ch_name, category=category, user_limit=size,
-            reason=f"Создано {member}: {mode_label}, {size} мест")
+            overwrites=overwrites,
+            reason=f"Создано {member}: {mode_label}, {rank_label}, {size} мест")
+        self.db.register_voice_channel(temp.id, interaction.guild.id)
         await member.move_to(temp)
         await interaction.response.send_message(
-            f"✅ Комната создана: {temp.mention} — {mode_label}, до {size} игроков.",
+            f"✅ Комната создана: {temp.mention} — {mode_label}, {rank_label}, до {size} игроков.",
             ephemeral=True)
 
 
 class VoiceRoomCreateView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, db: Storage):
         super().__init__(timeout=None)
+        self.db = db
 
     @discord.ui.button(label="Создать комнату", emoji="🎙",
                         style=discord.ButtonStyle.success,
                         custom_id="voice:create_room")
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VoiceRoomModal())
+        await interaction.response.send_modal(VoiceRoomModal(self.db))
 
 
 # ---------------- 🚨 жалобы на игроков в войсе ----------------
@@ -697,7 +722,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(LeaderboardPanelView(self.db))
         self.bot.add_view(HeroRollView())
         self.bot.add_view(NotifyRoleView())
-        self.bot.add_view(VoiceRoomCreateView())
+        self.bot.add_view(VoiceRoomCreateView(self.db))
         self.bot.add_view(VoiceReportView())
 
     # ---------- вход нового участника ----------
@@ -1219,7 +1244,7 @@ class ServerManagement(commands.Cog):
             ),
             color=0x2B2D31)
         if not vr_pinned:
-            vr_msg = await vr_create.send(embed=vr_embed, view=VoiceRoomCreateView())
+            vr_msg = await vr_create.send(embed=vr_embed, view=VoiceRoomCreateView(self.db))
             try:
                 await vr_msg.pin()
             except discord.Forbidden:
