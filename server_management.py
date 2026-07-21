@@ -76,7 +76,7 @@ GAME_TEXT_CHANNELS = [LFG_CHANNEL, "🐲-бестиарий"]
 SHOP_CATEGORY = "🛒 Магазин"
 SHOP_CHANNEL = "🛒-магазин"
 
-RANK_VOICE_NAMES = ["🔊 Radiant", "🔊 Dire"]  # по 2 голосовых в каждой ранговой категории
+RANK_VOICE_NAMES = []  # убраны — вместо них ранговые голосовые при создании комнат
 
 JOIN_TO_CREATE_CHANNEL = "➕ Создать войс"
 JOIN_TO_CREATE_CATEGORY = "🎙 Голосовые комнаты"
@@ -588,22 +588,39 @@ class VoiceRoomModal(discord.ui.Modal, title="Создать голосовую 
         member = interaction.user
         category = interaction.channel.category
         ch_name = f"🎙 {member.display_name} ({mode_label} • {rank_label} • {size})"
+
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True),
+                view_channel=True, connect=False),
             member: discord.PermissionOverwrite(
                 view_channel=True, connect=True, speak=True, manage_channels=True),
             interaction.guild.me: discord.PermissionOverwrite(
                 view_channel=True, connect=True, manage_channels=True),
         }
+
+        if rank_raw != "any" and rank_raw in RANK_LABELS:
+            RANK_ORDER = ["herald", "guardian", "crusader", "archon",
+                          "legend", "ancient", "divine", "immortal"]
+            min_idx = RANK_ORDER.index(rank_raw) if rank_raw in RANK_ORDER else 0
+            for tier_num, tier_name in RANK_TIER_NAMES.items():
+                tier_idx = tier_num - 1
+                if tier_idx >= min_idx:
+                    role = discord.utils.get(interaction.guild.roles, name=tier_name)
+                    if role:
+                        overwrites[role] = discord.PermissionOverwrite(
+                            view_channel=True, connect=True, speak=True)
         temp = await member.guild.create_voice_channel(
             name=ch_name, category=category, user_limit=size,
             overwrites=overwrites,
             reason=f"Создано {member}: {mode_label}, {rank_label}, {size} мест")
         self.db.register_voice_channel(temp.id, interaction.guild.id)
         await member.move_to(temp)
+        if rank_raw == "any":
+            note = "Могут зайти все верифицированные."
+        else:
+            note = f"Только {rank_label} и выше."
         await interaction.response.send_message(
-            f"✅ Комната создана: {temp.mention} — {mode_label}, {rank_label}, до {size} игроков.",
+            f"✅ Комната создана: {temp.mention} — {mode_label}, {rank_label}, до {size} игроков.\n{note}",
             ephemeral=True)
 
 
