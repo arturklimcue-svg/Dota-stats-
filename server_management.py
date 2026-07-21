@@ -611,7 +611,6 @@ class VoiceRoomModal(discord.ui.Modal, title="Создать голосовую 
             overwrites=overwrites,
             reason=f"Создано {member}: {mode_label}, {rank_label}, {size} мест")
         self.db.register_voice_channel(temp.id, interaction.guild.id)
-        self.db.protect_voice_target(temp.id, interaction.guild.id, "channel")
         await member.move_to(temp)
         await interaction.response.send_message(
             f"✅ Комната создана: {temp.mention} — {mode_label}, {rank_label}, до {size} игроков.",
