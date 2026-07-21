@@ -2062,7 +2062,7 @@ class CompareModal(discord.ui.Modal, title="Сравнить двух игрок
 REGISTER_CHANNEL = "🔐-ВЕРИФИКАЦИЯ"
 WELCOME_CHANNEL = "👋-приветствия"
 LEADERBOARD_CHANNEL_DASH = "🏆-лидерборд"
-STRATEGY_CHANNEL = "🧠-советы-и-стратегии"
+STRATEGY_CHANNEL = "🧠-стратегия"
 SHOP_CHANNEL = "🛒-магазин"
 
 
@@ -4068,7 +4068,7 @@ class DotaStats(commands.Cog):
             "🏆-лидерборд": ("🏆 Соревнования",
                 "Лидерборд, дуэли и турниры сервера.",
                 CompetitionView),
-            "🧠-советы-и-стратегии": ("🧠 Стратегия и аналитика",
+            "🧠-стратегия": ("🧠 Стратегия и аналитика",
                 "Мета героев, контр-пики, сравнение и разбор игр.",
                 StrategyView),
             "🛒-магазин": ("🛒 Магазин Shards",
