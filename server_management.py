@@ -104,6 +104,8 @@ PARTY_THREAD_ARCHIVE_MINUTES = 60
 AUTO_PURGE_CHANNELS = {"💬-чат": 6, LFG_CHANNEL: 2}  # имя канала -> часов хранения истории
 PURGE_INTERVAL_MINUTES = 30
 LFG_SLOWMODE_SECONDS = 15
+CHAT_SLOWMODE_SECONDS = 5  # общий чат — чтобы сообщения не тонули
+EVENTS_SLOWMODE_SECONDS = 30  # ивенты — не спамить
 
 # ---- новые фишки ----
 
@@ -203,6 +205,24 @@ PINNED_INFO = {
         "Нажмите кнопку «🏆 Показать лидерборд» ниже — топ-10 привязанных участников по "
         f"винрейту (нужно минимум {LEADERBOARD_MIN_GAMES} игр на аккаунте, чтобы попасть в список). "
         "Писать текст в этом канале нельзя — только кнопка."
+    ),
+    "💬-чат": (
+        "💬 Чат сервера",
+        "Общайтесь на темы Dota 2, делитесь опытом и просто болтайте.\n"
+        "Слоумод: 5 секунд между сообщениями."
+    ),
+    "🎉-ивенты": (
+        "🎉 Ивенты сервера",
+        "Анонсы турниров, внутренних соревнований и мероприятий.\n"
+        "Слоумод: 30 секунд — только важные новости."
+    ),
+    "🐲-бестиарий": (
+        "🐲 Бестиарий героев",
+        "Обсуждайте героев, а если лень выбирать — жмите кнопку ниже, бот выберет случайного."
+    ),
+    "📊-патчи": (
+        "📊 Аналитика патчей",
+        "Кто выиграл, кто проиграл — нажмите кнопку, чтобы узнать."
     ),
 }
 
@@ -1304,6 +1324,13 @@ class ServerManagement(commands.Cog):
                 ch = await guild.create_text_channel(ch_name, category=community_category)
             elif ch.category != community_category:
                 await ch.edit(category=community_category)
+        # slowmode на активных каналах
+        chat_ch = discord.utils.get(guild.text_channels, name="💬-чат")
+        if chat_ch:
+            await chat_ch.edit(slowmode_delay=CHAT_SLOWMODE_SECONDS)
+        events_ch = discord.utils.get(guild.text_channels, name="🎉-ивенты")
+        if events_ch:
+            await events_ch.edit(slowmode_delay=EVENTS_SLOWMODE_SECONDS)
 
         # ---- 📊 Стратегия (лидерборд, статус, аналитика — read-only + кнопки) ----
         strategy_category = discord.utils.get(guild.categories, name=STRATEGY_CATEGORY)
