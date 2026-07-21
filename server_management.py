@@ -550,6 +550,9 @@ class NotifyRoleView(discord.ui.View):
 
 # ---------------- 🎙 создание голосовых комнат с выбором параметров ----------------
 
+RANK_ORDER = ["herald", "guardian", "crusader", "archon",
+              "legend", "ancient", "divine", "immortal"]
+
 RANK_LABELS = {
     "herald": "Herald", "guardian": "Guardian", "crusader": "Crusader",
     "archon": "Archon", "legend": "Legend", "ancient": "Ancient",
@@ -557,71 +560,109 @@ RANK_LABELS = {
 }
 
 
-class VoiceRoomModal(discord.ui.Modal, title="Создать голосовую комнату"):
-    size = discord.ui.TextInput(
-        label="Размер (2–10)", placeholder="напр. 5", max_length=2, default="5")
-    mode = discord.ui.TextInput(
-        label="Режим: ranked / turbo / lp / unranked", placeholder="ranked",
-        max_length=10, default="ranked")
-    rank = discord.ui.TextInput(
-        label="Ранг (herald/guardian/.../immortal/any)", placeholder="any",
-        max_length=10, default="any")
-
+class VoiceRoomSetupView(discord.ui.View):
+    """Пошаговое создание голосовой комнаты через выпадающие списки."""
     def __init__(self, db: Storage):
-        super().__init__()
+        super().__init__(timeout=120)
         self.db = db
+        self.mode = "ranked"
+        self.rank = "any"
+        self.size = 5
+        self._update_labels()
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            size = int(str(self.size.value))
-            size = max(2, min(10, size))
-        except ValueError:
-            size = 5
-        mode = str(self.mode.value).lower().strip()
-        if mode not in GAME_MODE_NAMES:
-            mode = "unranked"
-        mode_label = GAME_MODE_NAMES[mode]
+    def _update_labels(self):
+        self.mode_select.placeholder = f"Режим: {GAME_MODE_NAMES[self.mode]}"
+        self.rank_select.placeholder = f"Ранг: {RANK_LABELS[self.rank]}"
+        self.size_select.placeholder = f"Игроков: {self.size}"
 
-        rank_raw = str(self.rank.value).lower().strip()
-        rank_label = RANK_LABELS.get(rank_raw, "Любой ранг")
+    @discord.ui.select(
+        placeholder="Режим игры",
+        options=[
+            discord.SelectOption(label="⚔️ Рейтинг", value="ranked", default=True),
+            discord.SelectOption(label="⚡ Турбо", value="turbo"),
+            discord.SelectOption(label="🤡 Лоу Приорити", value="lp"),
+            discord.SelectOption(label="🎮 Без ранга", value="unranked"),
+        ], row=0)
+    async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.mode = select.values[0]
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
 
+    @discord.ui.select(
+        placeholder="Ранг",
+        options=[
+            discord.SelectOption(label="Любой ранг", value="any", emoji="🎯", default=True),
+            discord.SelectOption(label="Herald", value="herald", emoji="1️⃣"),
+            discord.SelectOption(label="Guardian", value="guardian", emoji="2️⃣"),
+            discord.SelectOption(label="Crusader", value="crusader", emoji="3️⃣"),
+            discord.SelectOption(label="Archon", value="archon", emoji="4️⃣"),
+            discord.SelectOption(label="Legend", value="legend", emoji="5️⃣"),
+            discord.SelectOption(label="Ancient", value="ancient", emoji="6️⃣"),
+            discord.SelectOption(label="Divine", value="divine", emoji="7️⃣"),
+            discord.SelectOption(label="Immortal", value="immortal", emoji="8️⃣"),
+        ], row=1)
+    async def rank_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.rank = select.values[0]
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.select(
+        placeholder="Игроков: 5",
+        options=[
+            discord.SelectOption(label=f"{n} игроков", value=str(n))
+            for n in range(2, 11)
+        ], row=2)
+    async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.size = int(select.values[0])
+        self._update_labels()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Создать комнату", emoji="🎙",
+                        style=discord.ButtonStyle.success, row=3)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+        guild = interaction.guild
         category = interaction.channel.category
-        ch_name = f"🎙 {member.display_name} ({mode_label} • {rank_label} • {size})"
+        mode_label = GAME_MODE_NAMES[self.mode]
+        rank_label = RANK_LABELS[self.rank]
+        ch_name = f"🎙 {member.display_name} ({mode_label} • {rank_label} • {self.size})"
 
         overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(
-                view_channel=True, connect=False),
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
             member: discord.PermissionOverwrite(
                 view_channel=True, connect=True, speak=True, manage_channels=True),
             interaction.guild.me: discord.PermissionOverwrite(
                 view_channel=True, connect=True, manage_channels=True),
         }
 
-        if rank_raw != "any" and rank_raw in RANK_LABELS:
-            RANK_ORDER = ["herald", "guardian", "crusader", "archon",
-                          "legend", "ancient", "divine", "immortal"]
-            min_idx = RANK_ORDER.index(rank_raw) if rank_raw in RANK_ORDER else 0
+        if self.rank != "any" and self.rank in RANK_ORDER:
+            idx = RANK_ORDER.index(self.rank)
+            allowed_ranks = RANK_ORDER[max(0, idx - 1):idx + 1]
             for tier_num, tier_name in RANK_TIER_NAMES.items():
-                tier_idx = tier_num - 1
-                if tier_idx >= min_idx:
-                    role = discord.utils.get(interaction.guild.roles, name=tier_name)
+                if tier_name.lower() in allowed_ranks:
+                    role = discord.utils.get(guild.roles, name=tier_name)
                     if role:
                         overwrites[role] = discord.PermissionOverwrite(
                             view_channel=True, connect=True, speak=True)
-        temp = await member.guild.create_voice_channel(
-            name=ch_name, category=category, user_limit=size,
+
+        temp = await guild.create_voice_channel(
+            name=ch_name, category=category, user_limit=self.size,
             overwrites=overwrites,
-            reason=f"Создано {member}: {mode_label}, {rank_label}, {size} мест")
-        self.db.register_voice_channel(temp.id, interaction.guild.id)
+            reason=f"Создано {member}: {mode_label}, {rank_label}, {self.size} мест")
+        self.db.register_voice_channel(temp.id, guild.id)
         await member.move_to(temp)
-        if rank_raw == "any":
+
+        if self.rank == "any":
             note = "Могут зайти все верифицированные."
         else:
-            note = f"Только {rank_label} и выше."
+            allowed_names = [RANK_LABELS[r].title() for r in allowed_ranks]
+            note = f"Могут зайти: {', '.join(allowed_names)}."
+
         await interaction.response.send_message(
-            f"✅ Комната создана: {temp.mention} — {mode_label}, {rank_label}, до {size} игроков.\n{note}",
+            f"✅ Комната: {temp.mention}\n"
+            f"{mode_label} • {rank_label} • {self.size} мест\n{note}",
             ephemeral=True)
+        self.stop()
 
 
 class VoiceRoomCreateView(discord.ui.View):
@@ -633,7 +674,8 @@ class VoiceRoomCreateView(discord.ui.View):
                         style=discord.ButtonStyle.success,
                         custom_id="voice:create_room")
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VoiceRoomModal(self.db))
+        await interaction.response.send_message(
+            "Настройте свою комнату:", view=VoiceRoomSetupView(self.db), ephemeral=True)
 
 
 # ---------------- 🚨 жалобы на игроков в войсе ----------------
