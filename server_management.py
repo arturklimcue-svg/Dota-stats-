@@ -568,30 +568,37 @@ class VoiceRoomSetupView(discord.ui.View):
         self.mode = "ranked"
         self.rank = "any"
         self.size = 5
-        self._update_labels()
 
-    def _update_labels(self):
-        self.mode_select.placeholder = f"Режим: {GAME_MODE_NAMES[self.mode]}"
-        self.rank_select.placeholder = f"Ранг: {RANK_LABELS[self.rank]}"
-        self.size_select.placeholder = f"Игроков: {self.size}"
+    def _build_embed(self):
+        m = GAME_MODE_NAMES[self.mode]
+        r = RANK_LABELS[self.rank]
+        return discord.Embed(
+            title="🎙 Создать голосовую комнату",
+            description=(
+                f"**Режим:** {m}\n"
+                f"**Ранг:** {r}\n"
+                f"**Игроков:** {self.size}\n\n"
+                "Выберите параметры ниже и нажмите «Создать»."
+            ),
+            color=0x2B2D31)
 
     @discord.ui.select(
         placeholder="Режим игры",
         options=[
-            discord.SelectOption(label="⚔️ Рейтинг", value="ranked", default=True),
+            discord.SelectOption(label="⚔️ Рейтинг", value="ranked"),
             discord.SelectOption(label="⚡ Турбо", value="turbo"),
             discord.SelectOption(label="🤡 Лоу Приорити", value="lp"),
             discord.SelectOption(label="🎮 Без ранга", value="unranked"),
         ], row=0)
     async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.mode = select.values[0]
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=self._build_embed(), view=self)
 
     @discord.ui.select(
         placeholder="Ранг",
         options=[
-            discord.SelectOption(label="Любой ранг", value="any", emoji="🎯", default=True),
+            discord.SelectOption(label="Любой ранг", value="any", emoji="🎯"),
             discord.SelectOption(label="Herald", value="herald", emoji="1️⃣"),
             discord.SelectOption(label="Guardian", value="guardian", emoji="2️⃣"),
             discord.SelectOption(label="Crusader", value="crusader", emoji="3️⃣"),
@@ -603,8 +610,8 @@ class VoiceRoomSetupView(discord.ui.View):
         ], row=1)
     async def rank_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.rank = select.values[0]
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=self._build_embed(), view=self)
 
     @discord.ui.select(
         placeholder="Игроков: 5",
@@ -614,8 +621,8 @@ class VoiceRoomSetupView(discord.ui.View):
         ], row=2)
     async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.size = int(select.values[0])
-        self._update_labels()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=self._build_embed(), view=self)
 
     @discord.ui.button(label="Создать комнату", emoji="🎙",
                         style=discord.ButtonStyle.success, row=3)
@@ -674,8 +681,9 @@ class VoiceRoomCreateView(discord.ui.View):
                         style=discord.ButtonStyle.success,
                         custom_id="voice:create_room")
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = VoiceRoomSetupView(self.db)
         await interaction.response.send_message(
-            "Настройте свою комнату:", view=VoiceRoomSetupView(self.db), ephemeral=True)
+            embed=view._build_embed(), view=view, ephemeral=True)
 
 
 # ---------------- 🚨 жалобы на игроков в войсе ----------------
