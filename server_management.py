@@ -54,6 +54,11 @@ RANK_GROUPS = {
     "🛡 Archon – Legend": ["Archon", "Legend"],
     "👑 Ancient – Immortal": ["Ancient", "Divine", "Immortal"],
 }
+
+RANK_TO_CATEGORY = {}
+for _cat, _ranks in RANK_GROUPS.items():
+    for _r in _ranks:
+        RANK_TO_CATEGORY[_r.lower()] = _cat
 RANK_RESYNC_INTERVAL_HOURS = 24
 
 # ---- тематические категории и каналы ----
@@ -629,10 +634,17 @@ class VoiceRoomSetupView(discord.ui.View):
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         guild = interaction.guild
-        category = interaction.channel.category
         mode_label = GAME_MODE_NAMES[self.mode]
         rank_label = RANK_LABELS[self.rank]
         ch_name = f"🎙 {member.display_name} ({mode_label} • {rank_label} • {self.size})"
+
+        if self.rank != "any" and self.rank in RANK_TO_CATEGORY:
+            cat_name = RANK_TO_CATEGORY[self.rank]
+        else:
+            cat_name = JOIN_TO_CREATE_CATEGORY
+        category = discord.utils.get(guild.categories, name=cat_name)
+        if not category:
+            category = interaction.channel.category
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
