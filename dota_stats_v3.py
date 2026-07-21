@@ -190,9 +190,7 @@ ALWAYS_PROTECTED_VOICE_CATEGORY_NAMES = {
     "👑 Ancient – Immortal",
     "📊 Статистика сервера",
 }
-ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES = {
-    "➕ Создать войс",
-}
+ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES = set()
 
 # Маркер в начале сообщения-бэкапа — по нему бот отличает "свои" служебные
 # сообщения от любых других (например, если админ что-то написал в тот же

@@ -83,9 +83,7 @@ SHOP_CHANNEL = "🛒-магазин"
 
 RANK_VOICE_NAMES = []  # убраны — вместо них ранговые голосовые при создании комнат
 
-JOIN_TO_CREATE_CHANNEL = "➕ Создать войс"
 JOIN_TO_CREATE_CATEGORY = "🎙 Голосовые комнаты"
-JOIN_TO_CREATE_USER_LIMIT = 5
 
 VOICE_ROOM_CREATE_CHANNEL = "🎮-создание-комнат"
 VOICE_ROOM_CHAT_CHANNELS = []
@@ -632,6 +630,7 @@ class VoiceRoomSetupView(discord.ui.View):
     @discord.ui.button(label="Создать комнату", emoji="🎙",
                         style=discord.ButtonStyle.success, row=3)
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         member = interaction.user
         guild = interaction.guild
         mode_label = GAME_MODE_NAMES[self.mode]
@@ -677,7 +676,7 @@ class VoiceRoomSetupView(discord.ui.View):
             allowed_names = [RANK_LABELS[r].title() for r in allowed_ranks]
             note = f"Могут зайти: {', '.join(allowed_names)}."
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Комната: {temp.mention}\n"
             f"{mode_label} • {rank_label} • {self.size} мест\n{note}",
             ephemeral=True)
@@ -1391,17 +1390,10 @@ class ServerManagement(commands.Cog):
                 "ниже, бот выберет за вас.",
                 view=HeroRollView())
 
-        # ---- join-to-create ----
+        # ---- 🎙 Голосовые комнаты (категория + канал создания) ----
         jtc_category = discord.utils.get(guild.categories, name=JOIN_TO_CREATE_CATEGORY)
         if not jtc_category:
             jtc_category = await guild.create_category(JOIN_TO_CREATE_CATEGORY)
-        jtc_hub = discord.utils.get(guild.voice_channels, name=JOIN_TO_CREATE_CHANNEL)
-        if not jtc_hub:
-            jtc_hub = await guild.create_voice_channel(JOIN_TO_CREATE_CHANNEL, category=jtc_category)
-        # ВАЖНО: хаб сам почти всегда пустеет через секунду после захода
-        # (человека сразу переносит в новый temp-канал) — без защиты общий
-        # листенер автоудаления снёс бы сам хаб при первом же использовании
-        self.db.protect_voice_target(jtc_hub.id, guild.id, "channel")
         await jtc_category.set_permissions(everyone, view_channel=False)
         await jtc_category.set_permissions(verified, view_channel=True, connect=True)
 
@@ -1417,12 +1409,11 @@ class ServerManagement(commands.Cog):
             title="🎙 Создать голосовую комнату",
             description=(
                 "Нажмите кнопку ниже, чтобы создать свою голосовую комнату.\n\n"
-                "**Доступные режимы:**\n"
-                "⚔️ Рейтинг — полноценный Ranked\n"
-                "⚡ Турбо — быстрые игры\n"
-                "🤡 Лоу Приорити — для наказанных\n"
-                "🎮 Без ранга — обычный All Pick\n\n"
-                "Размер: от 2 до 10 игроков."
+                "**Как работает:**\n"
+                "1. Выберите режим и ранг\n"
+                "2. Нажмите «Создать»\n"
+                "3. Комната появится в вашей ранговой категории\n\n"
+                "Комната удалится автоматически, когда все выйдут."
             ),
             color=0x2B2D31)
         if not vr_pinned:
@@ -1432,7 +1423,7 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # ---- чаты для общения (4-6 каналов) ----
+        # ---- чаты для общения ----
         for ch_name in VOICE_ROOM_CHAT_CHANNELS:
             chat_ch = discord.utils.get(guild.text_channels, name=ch_name)
             if not chat_ch:
