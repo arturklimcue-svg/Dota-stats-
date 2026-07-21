@@ -1011,30 +1011,24 @@ class ServerManagement(commands.Cog):
     @tasks.loop(minutes=STATS_UPDATE_INTERVAL_MINUTES)
     async def update_stats_channels(self):
         for guild in self.bot.guilds:
-            category = discord.utils.get(guild.categories, name=STATS_CATEGORY)
-            if not category:
+            stats_ch = discord.utils.get(guild.text_channels, name="📊-статистика")
+            if not stats_ch:
                 continue
+            pins = await stats_ch.pins()
+            if not pins:
+                continue
+            stats_msg = pins[0]
             verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
             verified_count = len(verified_role.members) if verified_role else 0
-
-            member_ch_name = f"{MEMBER_COUNT_CHANNEL_PREFIX}: {guild.member_count}"
-            verified_ch_name = f"{VERIFIED_COUNT_CHANNEL_PREFIX}: {verified_count}"
-
-            member_ch = discord.utils.find(
-                lambda c: c.name.startswith(MEMBER_COUNT_CHANNEL_PREFIX), category.voice_channels)
-            if member_ch and member_ch.name != member_ch_name:
-                try:
-                    await member_ch.edit(name=member_ch_name)
-                except discord.HTTPException:
-                    pass  # Discord ограничивает частоту переименований — просто ждём следующий цикл
-
-            verified_ch = discord.utils.find(
-                lambda c: c.name.startswith(VERIFIED_COUNT_CHANNEL_PREFIX), category.voice_channels)
-            if verified_ch and verified_ch.name != verified_ch_name:
-                try:
-                    await verified_ch.edit(name=verified_ch_name)
-                except discord.HTTPException:
-                    pass
+            stats_embed = discord.Embed(title="📊 Статистика сервера", color=0x8B4513)
+            stats_embed.add_field(name="👥 Участников", value=str(guild.member_count), inline=True)
+            stats_embed.add_field(name="✅ Верифицировано", value=str(verified_count), inline=True)
+            stats_embed.add_field(name="🎭 Ролей", value=str(len(guild.roles) - 1), inline=True)
+            stats_embed.add_field(name="📝 Каналов", value=str(len(guild.channels)), inline=True)
+            try:
+                await stats_msg.edit(embed=stats_embed)
+            except discord.HTTPException:
+                pass
 
     @update_stats_channels.before_loop
     async def before_stats(self):
@@ -1338,12 +1332,16 @@ class ServerManagement(commands.Cog):
         await verify_ch.set_permissions(verified, view_channel=False)
 
         # закрываем все остальные существующие каналы от @everyone
+        # (кроме верификации и модерации — их не трогаем)
         for ch in guild.channels:
-            if ch.id != verify_ch.id:
-                try:
-                    await ch.set_permissions(everyone, view_channel=False)
-                except discord.Forbidden:
-                    pass
+            if ch.id == verify_ch.id:
+                continue
+            if ch.category and ch.category.name == STAFF_CATEGORY:
+                continue
+            try:
+                await ch.set_permissions(everyone, view_channel=False)
+            except discord.Forbidden:
+                pass
 
         # ---- 📋 Начало (видно всем, для новичков) ----
         info_category = discord.utils.get(guild.categories, name=INFO_CATEGORY)
@@ -1553,19 +1551,26 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # ---- 📊 Статистика сервера (два "немых" голосовых-счётчика) ----
+        # ---- 📊 Статистика сервера (автообновляемый embed) ----
         stats_category = discord.utils.get(guild.categories, name=STATS_CATEGORY)
         if not stats_category:
             stats_category = await guild.create_category(STATS_CATEGORY)
-        await stats_category.set_permissions(everyone, view_channel=True, connect=False)
-        if not discord.utils.find(lambda c: c.name.startswith(MEMBER_COUNT_CHANNEL_PREFIX),
-                                   stats_category.voice_channels):
-            await guild.create_voice_channel(
-                f"{MEMBER_COUNT_CHANNEL_PREFIX}: {guild.member_count}", category=stats_category)
-        if not discord.utils.find(lambda c: c.name.startswith(VERIFIED_COUNT_CHANNEL_PREFIX),
-                                   stats_category.voice_channels):
-            await guild.create_voice_channel(
-                f"{VERIFIED_COUNT_CHANNEL_PREFIX}: 0", category=stats_category)
+        await stats_category.set_permissions(everyone, view_channel=True, send_messages=False)
+        stats_ch = discord.utils.get(guild.text_channels, name="📊-статистика")
+        if not stats_ch:
+            stats_ch = await guild.create_text_channel("📊-статистика", category=stats_category)
+        verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
+        verified_count = len(verified_role.members) if verified_role else 0
+        stats_embed = discord.Embed(title="📊 Статистика сервера", color=0x8B4513)
+        stats_embed.add_field(name="👥 Участников", value=str(guild.member_count), inline=True)
+        stats_embed.add_field(name="✅ Верифицировано", value=str(verified_count), inline=True)
+        stats_embed.add_field(name="🎭 Ролей", value=str(len(guild.roles) - 1), inline=True)
+        stats_embed.add_field(name="📝 Каналов", value=str(len(guild.channels)), inline=True)
+        stats_msg = await stats_ch.send(embed=stats_embed)
+        try:
+            await stats_msg.pin()
+        except discord.Forbidden:
+            pass
 
         # ---- ранговые категории: текст + два голосовых (Radiant/Dire) ----
         for group_name, tier_names in RANK_GROUPS.items():
@@ -1656,10 +1661,44 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
+        # ---- удаление каналов, не относящихся к боту ----
+        BOT_CATEGORY_NAMES = {
+            INFO_CATEGORY, COMMUNITY_CATEGORY, STRATEGY_CATEGORY, GAME_CATEGORY,
+            SHOP_CATEGORY, JOIN_TO_CREATE_CATEGORY, STATS_CATEGORY, STAFF_CATEGORY,
+            GUEST_CATEGORY,
+        }
+        deleted_count = 0
+        for ch in list(guild.channels):
+            if ch.category and ch.category.name in BOT_CATEGORY_NAMES:
+                continue
+            if ch.category and ch.category.name == STAFF_CATEGORY:
+                continue
+            if ch.id == verify_ch.id:
+                continue
+            if ch.type == discord.ChannelType.category:
+                if ch.name not in BOT_CATEGORY_NAMES and ch.name != STAFF_CATEGORY:
+                    for sub_ch in ch.channels:
+                        try:
+                            await sub_ch.delete(reason="Старый канал, не относится к боту")
+                            deleted_count += 1
+                        except discord.HTTPException:
+                            pass
+                    try:
+                        await ch.delete(reason="Старая категория, не относится к боту")
+                        deleted_count += 1
+                    except discord.HTTPException:
+                        pass
+            elif not ch.category:
+                try:
+                    await ch.delete(reason="Старый канал без категории")
+                    deleted_count += 1
+                except discord.HTTPException:
+                    pass
+
         await ctx.send(
-            "Готово: категории \"Начало/Таверна/Стратегия/Игровое\", ранговые каналы, "
-            "доска \"кто в игре\", лидерборд, стратегии, войс-комнаты с выбором параметров, "
-            "жалобы, ролл героя, уведомления и верификация настроены.")
+            f"Готово! Настроены: Начало, Арена, Стратегия, Игровое, Магазин, "
+            f"Гости, Голосовые комнаты, Статистика, Модерация, верификация.\n"
+            f"Удалено лишних каналов: {deleted_count}.")
 
 
 async def setup(bot: commands.Bot):
