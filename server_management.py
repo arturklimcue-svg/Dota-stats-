@@ -147,6 +147,24 @@ HERO_ROLL_CHANNEL = "🐲-бестиарий"
 # 🔔 самоназначаемая роль уведомлений (турниры/ивенты сервера)
 NOTIFY_ROLE_NAME = "🔔 Уведомления"
 
+# 🎭 роли интересов
+INTEREST_ROLES = {
+    "🎯 Ищу тиму": "🎯 Ищу тиму",
+    "🎓 Коучусь": "🎓 Коучусь",
+    "📹 Делаю контент": "📹 Делаю контент",
+    "🏆 Турниры": "🏆 Турнирный игрок",
+}
+
+# 📈 прогресс MMR
+MMR_PROGRESS_CHANNEL = "🏆-лидерборд"
+
+# 📋 FAQ
+FAQ_CHANNEL = "📜-правила"
+
+# 🔔 токсичность
+TOXICITY_TRIGGER_WORDS = ["IDIOT", "NOOB", "FEEDER", "ТВОЙ МАМА", "IDIOT", "N00B", "RETARD"]
+TOXICITY_THRESHOLD = 3
+
 # 📈 еженедельный дайджест меты — топ-5 героев по пикрейту, по понедельникам
 WEEKLY_META_TIME_UTC = dt_time(hour=10, minute=0)
 WEEKLY_META_CHANNEL = "📢-объявления"
@@ -1057,6 +1075,9 @@ class DailyQuestAnswerView(discord.ui.View):
 
 # ---------------- 📺 стримы сервера ----------------
 
+stream_messages: dict[int, int] = {}  # user_id -> message_id
+
+
 class StreamButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1069,8 +1090,18 @@ class StreamButtonView(discord.ui.View):
         member = interaction.user
         if role in member.roles:
             await member.remove_roles(role, reason="Выключил стрим")
+            # удалить сообщение о стриме
+            msg_id = stream_messages.pop(member.id, None)
+            if msg_id:
+                events_ch = discord.utils.get(interaction.guild.text_channels, name=STREAMS_CHANNEL)
+                if events_ch:
+                    try:
+                        old_msg = await events_ch.fetch_message(msg_id)
+                        await old_msg.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
             await interaction.response.send_message(
-                "📺 Стрим завершён — роль убрана.", ephemeral=True)
+                "📺 Стрим завершён — роль убрана, объявление удалено.", ephemeral=True)
         else:
             await member.add_roles(role, reason="Начал стрим")
             events_ch = discord.utils.get(interaction.guild.text_channels, name=STREAMS_CHANNEL)
@@ -1079,7 +1110,8 @@ class StreamButtonView(discord.ui.View):
                     title="📺 Стрим!",
                     description=f"{member.mention} начинает стримить!",
                     color=0x8B4513)
-                await events_ch.send(content=role.mention, embed=embed)
+                msg = await events_ch.send(content=role.mention, embed=embed)
+                stream_messages[member.id] = msg.id
             await interaction.response.send_message(
                 "📺 Стрим начат! Роль «📺 Стример» выдана.", ephemeral=True)
 
@@ -1445,6 +1477,162 @@ class CalendarView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ---------------- ❓ FAQ ----------------
+
+FAQ_ANSWERS = {
+    "Как привязать Steam?": "Зайдите в #🔐-ВЕРИФИКАЦИЯ и нажмите кнопку. Введите SteamID (64-бит или account_id).",
+    "Как создать голосовую комнату?": "Зайдите в #🎮-создание-комнат, нажмите «🎙 Создать комнату» и выберите параметры.",
+    "Как работает быстрый матч?": "Нажмите «⚡ Найти тиму» в #🎮-создание-комнат. Когда соберётся 5 человек — бот создаст войс.",
+    "Что такое shards?": "Виртуальная валюта сервера. Получаете за матчи, достижения, ежедневный бонус. Тратите в #🛒-магазин.",
+    "Как попасть в лидерборд?": "Нужно минимум 20 игр на аккаунте. Нажмите кнопку в #🏆-лидерборд.",
+    "Как стать наставником?": "Нажмите «🤝 Стать наставником» в #📜-правила.",
+    "Как стримить на сервере?": "Нажмите «📺 Стримлю» в #🎉-ивенты — получите роль и объявление.",
+    "Где правила?": "#📜-правила — обязательно к прочтению.",
+    "Как получить роль?": "Роль ранга выдаётся автоматически при верификации и обновляется раз в сутки.",
+}
+
+
+class FAQView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="❓ Частые вопросы", emoji="❓",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="faq:show")
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="❓ Частые вопросы",
+            color=0x8B4513)
+        for q, a in FAQ_ANSWERS.items():
+            embed.add_field(name=q, value=a, inline=False)
+        embed.set_footer(text="Не нашли ответ? Спросите в #💬-чат!")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---------------- 📈 прогресс MMR ----------------
+
+class MMRProgressView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Мой прогресс", emoji="📈",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="mmr:progress")
+    async def progress_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        account_id = self.db.get_account_id(interaction.user.id)
+        if not account_id:
+            await interaction.followup.send("Сначала привяжите SteamID.", ephemeral=True)
+            return
+        profile = await od.get(f"/players/{account_id}")
+        if not profile:
+            await interaction.followup.send("Не удалось загрузить профиль.", ephemeral=True)
+            return
+        rank_tier = profile.get("rank_tier")
+        rank_name = "Unranked"
+        if rank_tier:
+            major = rank_tier // 10
+            rank_name = {1: "Herald", 2: "Guardian", 3: "Crusader", 4: "Archon",
+                         5: "Legend", 6: "Ancient", 7: "Divine", 8: "Immortal"}.get(major, "Unranked")
+        wl = await od.get(f"/players/{account_id}/wl")
+        wins = wl.get("win", 0) if wl else 0
+        losses = wl.get("lose", 0) if wl else 0
+        total = wins + losses
+        wr = (wins / total * 100) if total > 0 else 0
+        embed = discord.Embed(
+            title="📈 Мой прогресс",
+            description=(
+                f"**Ранг:** {rank_name}\n"
+                f"**Побед:** {wins}\n"
+                f"**Поражений:** {losses}\n"
+                f"**Винрейт:** {wr:.1f}%\n"
+                f"**Всего матчей:** {total}"
+            ),
+            color=0x8B4513)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ---------------- 🎭 роли интересов ----------------
+
+class InterestRolesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Выбрать роль", emoji="🎭",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="interest:toggle")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = [
+            discord.SelectOption(label=name, value=name, emoji=emoji)
+            for name, emoji in INTEREST_ROLES.items()
+        ]
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="🎭 Роли интересов",
+                description="Выберите роль, чтобы найти единомышленников:",
+                color=0x8B4513),
+            view=InterestSelectView(),
+            ephemeral=True)
+
+
+class InterestSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.select(
+        placeholder="Выберите роль",
+        options=[discord.SelectOption(label=name, value=name)
+                 for name in INTEREST_ROLES.keys()],
+        min_values=1, max_values=len(INTEREST_ROLES))
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        added = []
+        removed = []
+        for role_name in select.values:
+            role = await get_or_create_role(interaction.guild, role_name)
+            if role in interaction.user.roles:
+                await interaction.user.remove_roles(role)
+                removed.append(role_name)
+            else:
+                await interaction.user.add_roles(role)
+                added.append(role_name)
+        parts = []
+        if added:
+            parts.append(f"Выданы: {', '.join(added)}")
+        if removed:
+            parts.append(f"Убраны: {', '.join(removed)}")
+        await interaction.response.send_message(
+            " | ".join(parts) if parts else "Без изменений.", ephemeral=True)
+        self.stop()
+
+
+# ---------------- 🔔 токсичность ----------------
+
+class ToxicityAlertListener(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.msg_counts: dict[int, int] = {}  # user_id -> count
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        content = message.content.upper()
+        for word in TOXICITY_TRIGGER_WORDS:
+            if word in content:
+                uid = message.author.id
+                self.msg_counts[uid] = self.msg_counts.get(uid, 0) + 1
+                if self.msg_counts[uid] >= TOXICITY_THRESHOLD:
+                    mod_log = discord.utils.get(message.guild.text_channels, name=MOD_LOG_CHANNEL)
+                    if mod_log:
+                        await mod_log.send(
+                            f"🔔 **Токсичность:** {message.author.mention} "
+                            f"написал подозрительное сообщение в {message.channel.mention}.\n"
+                            f"Контекст: {message.content[:200]}")
+                    self.msg_counts[uid] = 0
+                break
+
+
 # ---------------- cog ----------------
 
 class ServerManagement(commands.Cog):
@@ -1498,6 +1686,9 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(ModWarningView())
         self.bot.add_view(ModTimeoutView())
         self.bot.add_view(CalendarView())
+        self.bot.add_view(FAQView())
+        self.bot.add_view(MMRProgressView(self.db))
+        self.bot.add_view(InterestRolesView())
 
     # ---------- вход нового участника ----------
 
@@ -1550,6 +1741,14 @@ class ServerManagement(commands.Cog):
             ch = discord.utils.get(guild.text_channels, name=DAILY_QUEST_CHANNEL)
             if not ch:
                 continue
+            # удалить старый квест дня
+            try:
+                pins = await ch.pins()
+                for p in pins:
+                    if p.embeds and p.embeds[0].title == "🐲 Вопрос дня":
+                        await p.delete()
+            except discord.Forbidden:
+                pass
             embed = discord.Embed(
                 title="🐲 Вопрос дня",
                 description=q["q"],
@@ -1558,7 +1757,8 @@ class ServerManagement(commands.Cog):
             embed.add_field(name="Варианты:", value=options_text, inline=False)
             embed.set_footer(text="Нажмите кнопку, чтобы ответить!")
             try:
-                await ch.send(embed=embed, view=DailyQuestView())
+                msg = await ch.send(embed=embed, view=DailyQuestView())
+                await msg.pin()
             except discord.HTTPException:
                 pass
 
@@ -1614,6 +1814,14 @@ class ServerManagement(commands.Cog):
             ch = discord.utils.get(guild.text_channels, name=DAILY_POLL_CHANNEL)
             if not ch:
                 continue
+            # удалить старый опрос
+            try:
+                pins = await ch.pins()
+                for p in pins:
+                    if p.embeds and p.embeds[0].title == "🗳 Опрос дня":
+                        await p.delete()
+            except discord.Forbidden:
+                pass
             embed = discord.Embed(
                 title="🗳 Опрос дня",
                 description=q["q"],
@@ -1622,7 +1830,8 @@ class ServerManagement(commands.Cog):
             embed.add_field(name="Варианты:", value=options_text, inline=False)
             embed.set_footer(text="Нажмите кнопку, чтобы проголосовать!")
             try:
-                await ch.send(embed=embed, view=DailyPollView())
+                msg = await ch.send(embed=embed, view=DailyPollView())
+                await msg.pin()
             except discord.HTTPException:
                 pass
 
@@ -2165,6 +2374,28 @@ class ServerManagement(commands.Cog):
         if events_ch:
             await events_ch.edit(slowmode_delay=EVENTS_SLOWMODE_SECONDS)
 
+        # ---- 🎭 роли интересов (в приветствия) ----
+        welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
+        if welcome_ch:
+            interest_embed = discord.Embed(
+                title="🎭 Роли интересов",
+                description=(
+                    "Выберите роль, чтобы найти единомышленников!\n"
+                    "• 🎯 Ищу тиму\n• 🎓 Коучусь\n• 📹 Делаю контент\n• 🏆 Турниры"
+                ),
+                color=0x8B4513)
+            w_pins = await welcome_ch.pins()
+            has_interest = any(
+                e.title == "🎭 Роли интересов" for p in w_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_interest:
+                interest_msg = await welcome_ch.send(
+                    embed=interest_embed, view=InterestRolesView())
+                try:
+                    await interest_msg.pin()
+                except discord.Forbidden:
+                    pass
+
         # ---- 📊 Стратегия (лидерборд, статус, аналитика — read-only + кнопки) ----
         strategy_category = discord.utils.get(guild.categories, name=STRATEGY_CATEGORY)
         if not strategy_category:
@@ -2419,6 +2650,21 @@ class ServerManagement(commands.Cog):
                 except discord.Forbidden:
                     pass
 
+            # ---- 📈 прогресс MMR (в лидерборд) ----
+            mmr_embed = discord.Embed(
+                title="📈 Мой прогресс",
+                description="Нажмите, чтобы увидеть ваш статистику и прогресс.",
+                color=0x8B4513)
+            has_mmr = any(
+                e.title == "📈 Мой прогресс" for p in lb_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_mmr:
+                mmr_msg = await lb_ch.send(embed=mmr_embed, view=MMRProgressView(self.db))
+                try:
+                    await mmr_msg.pin()
+                except discord.Forbidden:
+                    pass
+
         # ---- 🤝 наставники (в правилах) ----
         rules_ch = discord.utils.get(guild.text_channels, name="📜-правила")
         if rules_ch:
@@ -2444,6 +2690,21 @@ class ServerManagement(commands.Cog):
                 mentor_msg = await rules_ch.send(embed=mentor_embed, view=mentor_view)
                 try:
                     await mentor_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+            # ---- ❓ FAQ (в правилах) ----
+            faq_embed = discord.Embed(
+                title="❓ Частые вопросы",
+                description="Нажмите кнопку, чтобы увидеть ответы на частые вопросы.",
+                color=0x8B4513)
+            has_faq = any(
+                e.title == "❓ Частые вопросы" for p in rules_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_faq:
+                faq_msg = await rules_ch.send(embed=faq_embed, view=FAQView())
+                try:
+                    await faq_msg.pin()
                 except discord.Forbidden:
                     pass
 
@@ -2683,3 +2944,4 @@ class ServerManagement(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ServerManagement(bot))
+    await bot.add_cog(ToxicityAlertListener(bot))
