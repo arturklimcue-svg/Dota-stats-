@@ -63,6 +63,9 @@ INFO_TEXT_CHANNELS = ["📜-правила", "📢-объявления"]  # + V
 
 SHOP_CHANNEL = "🛒-магазин"
 
+# 📊 аналитика патчей
+PATCH_ANALYTICS_CHANNEL = "📊-аналитика-патчей"
+
 COMMUNITY_CATEGORY = "💬 Таверна"
 COMMUNITY_TEXT_CHANNELS = ["👋-приветствия", "💬-общий-чат", "🖼-скриншоты",
                            "🎬-клипы-и-фейлы", "😂-мемы", "🎉-ивенты", SHOP_CHANNEL]
@@ -141,8 +144,7 @@ NOTIFY_ROLE_NAME = "🔔 Уведомления"
 WEEKLY_META_TIME_UTC = dt_time(hour=10, minute=0)
 WEEKLY_META_CHANNEL = "📢-объявления"
 
-# 📊 аналитика патчей — ежедневный дайджест изменений меты
-PATCH_ANALYTICS_CHANNEL = "📊-аналитика-патчей"
+# 📊 ежедневный дайджест аналитики патчей
 PATCH_ANALYTICS_TIME_UTC = dt_time(hour=11, minute=0)
 
 # 🔇 каналы, где обычным участникам нельзя писать текст — только кнопки/модалки бота
