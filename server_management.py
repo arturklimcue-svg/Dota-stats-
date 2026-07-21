@@ -2533,6 +2533,54 @@ class ServerManagement(commands.Cog):
                 except discord.Forbidden:
                     pass
 
+        # ---- 🐲 квест дня (в ивенты) ----
+        if events_ch:
+            import hashlib
+            today = discord.utils.utcnow().date().isoformat()
+            idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
+            q = DAILY_QUEST_QUESTIONS[idx]
+            quest_embed = discord.Embed(
+                title="🐲 Вопрос дня",
+                description=q["q"],
+                color=0x8B4513)
+            options_text = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(q["options"]))
+            quest_embed.add_field(name="Варианты:", value=options_text, inline=False)
+            quest_embed.set_footer(text="Нажмите кнопку, чтобы ответить!")
+            ev_pins = await events_ch.pins()
+            has_quest = any(
+                e.title == "🐲 Вопрос дня" for p in ev_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_quest:
+                quest_msg = await events_ch.send(embed=quest_embed, view=DailyQuestView())
+                try:
+                    await quest_msg.pin()
+                except discord.Forbidden:
+                    pass
+
+        # ---- 🗳 опрос дня (в ивенты) ----
+        if events_ch:
+            import hashlib
+            today = discord.utils.utcnow().date().isoformat()
+            pidx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
+            pq = DAILY_POLL_QUESTIONS[pidx]
+            poll_embed = discord.Embed(
+                title="🗳 Опрос дня",
+                description=pq["q"],
+                color=0x8B4513)
+            poll_options = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(pq["options"]))
+            poll_embed.add_field(name="Варианты:", value=poll_options, inline=False)
+            poll_embed.set_footer(text="Нажмите кнопку, чтобы проголосовать!")
+            ev_pins = await events_ch.pins()
+            has_poll = any(
+                e.title == "🗳 Опрос дня" for p in ev_pins if p.embeds
+                for e in [p.embeds[0]] if hasattr(e, 'title'))
+            if not has_poll:
+                poll_msg = await events_ch.send(embed=poll_embed, view=DailyPollView())
+                try:
+                    await poll_msg.pin()
+                except discord.Forbidden:
+                    pass
+
         # ---- темы каналов (визуальное оформление) ----
         for ch_name, topic in CHANNEL_TOPICS.items():
             ch = discord.utils.get(guild.text_channels, name=ch_name)
