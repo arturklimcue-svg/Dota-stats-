@@ -1417,6 +1417,7 @@ class OpenDota:
 
 
 od = OpenDota()
+db = Storage(DB_PATH)  # единый экземпляр БД для всех cog'ов
 
 
 # ---------------- Steam Web API client (статус "в игре", детект пати) ----------------
@@ -2998,7 +2999,7 @@ class TournamentMatchView(discord.ui.View):
 class DotaStats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db = Storage(DB_PATH)
+        self.db = db  # единый экземпляр, определённый на уровне модуля
         self._dirty_economy: set[int] = set()  # discord_id кого нужно записать в канал-бэкап
         self._dirty_achievements: set[int] = set()
         self._dirty_tournaments: set[int] = set()  # tournament_id

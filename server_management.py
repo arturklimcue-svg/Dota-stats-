@@ -35,7 +35,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands, tasks
 
-from dota_stats_v3 import od, to_account_id, to_steam64, Storage, DB_PATH, PatchAnalyticsView
+from dota_stats_v3 import od, db, to_account_id, to_steam64, Storage, DB_PATH, PatchAnalyticsView
 
 # ---------------- конфиг ----------------
 
@@ -704,7 +704,7 @@ class VoiceReportView(discord.ui.View):
 class ServerManagement(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db = Storage(DB_PATH)  # общая база с dota_stats_v3 — те же привязанные SteamID
+        self.db = db  # общий экземпляр с dota_stats_v3
         self.temp_voice_channels: set[int] = set()
         self.resync_ranks.start()
         self.auto_purge.start()
