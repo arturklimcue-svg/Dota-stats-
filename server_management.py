@@ -2580,6 +2580,26 @@ class ServerManagement(commands.Cog):
             GUEST_CATEGORY,
         }
         deleted_count = 0
+
+        # удаление старых голосовых каналов-счётчиков (👥 Участников / ✅ Верифицировано)
+        for ch in list(guild.voice_channels):
+            if ch.name.startswith("👥 Участников") or ch.name.startswith("✅ Верифицировано"):
+                try:
+                    await ch.delete(reason="Старый канал-счётчик")
+                    deleted_count += 1
+                except discord.HTTPException:
+                    pass
+
+        # удаление голосовых каналов в категории Статистика (там должен быть только текстовый)
+        stats_cat = discord.utils.get(guild.categories, name=STATS_CATEGORY)
+        if stats_cat:
+            for ch in list(stats_cat.voice_channels):
+                try:
+                    await ch.delete(reason="Старый голосовой в Статистике")
+                    deleted_count += 1
+                except discord.HTTPException:
+                    pass
+
         for ch in list(guild.channels):
             if ch.category and ch.category.name in BOT_CATEGORY_NAMES:
                 continue
