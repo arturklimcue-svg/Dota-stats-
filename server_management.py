@@ -338,6 +338,38 @@ async def post_pinned_info(channel: discord.TextChannel, title: str, description
         pass
 
 
+async def post_pinned_info_with_view(channel: discord.TextChannel,
+                                      embed: discord.Embed, view: discord.ui.View):
+    """Отправляет и закрепляет embed с view. Удаляет старый пин с тем же заголовком."""
+    try:
+        pins = await channel.pins()
+    except discord.Forbidden:
+        return
+    me = channel.guild.me
+    title = embed.title
+    existing = next(
+        (p for p in pins if p.author.id == me.id and p.embeds and p.embeds[0].title == title),
+        None,
+    )
+    if existing:
+        has_components = bool(existing.components)
+        if has_components:
+            return
+        try:
+            await existing.unpin()
+        except discord.Forbidden:
+            pass
+        try:
+            await existing.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+    msg = await channel.send(embed=embed, view=view)
+    try:
+        await msg.pin()
+    except discord.Forbidden:
+        pass
+
+
 async def upload_custom_stickers(guild: discord.Guild):
     """Заливает .png файлы из STICKERS_DIR как стикеры сервера, если их там ещё нет.
     Требует, чтобы файлы уже лежали на диске (см. предупреждение у STICKERS_DIR)."""
@@ -1728,6 +1760,139 @@ class ToxicityAlertListener(commands.Cog):
                 break
 
 
+# ---------------- 📊 просмотр патчей ----------------
+
+class PatchViewPage(discord.ui.View):
+    """Страница конкретного патча."""
+    def __init__(self, patch_data: dict, page: int, total: int):
+        super().__init__(timeout=300)
+        self.page = page
+        self.total = total
+        if page > 0:
+            self.add_item(discord.ui.Button(
+                label="⬅️ Предыдущий", style=discord.ButtonStyle.secondary,
+                custom_id=f"patch:page:{page-1}"))
+        if page < total - 1:
+            self.add_item(discord.ui.Button(
+                label="Следующий ➡️", style=discord.ButtonStyle.secondary,
+                custom_id=f"patch:page:{page+1}"))
+
+    @discord.ui.button(label="🔙 Ко всем патчам", style=discord.ButtonStyle.secondary,
+                        custom_id="patch:back_to_list")
+    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = PatchListView()
+        await interaction.response.edit_message(embed=await view.build_embed(), view=view)
+
+
+class PatchListView(discord.ui.View):
+    """Список последних 5 патчей Dota 2."""
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="📊 Открыть список патчей", style=discord.ButtonStyle.secondary,
+                        custom_id="patch:list")
+    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.build_embed()
+        await interaction.response.send_message(embed=embed, view=PatchListView(), ephemeral=True)
+
+    async def build_embed(self) -> discord.Embed:
+        import aiohttp
+        patches = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.opendota.com/api/patches",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        patches = data[-5:][::-1] if data else []
+        except Exception:
+            pass
+        if not patches:
+            return discord.Embed(
+                title="📊 Последние патчи Dota 2",
+                description="Не удалось загрузить данные о патчах.",
+                color=0x8B4513)
+        lines = []
+        for i, p in enumerate(patches):
+            name = p.get("name", "Неизвестно")
+            date_ts = p.get("release_date", 0)
+            if date_ts:
+                from datetime import datetime
+                date_str = datetime.utcfromtimestamp(date_ts).strftime("%d.%m.%Y")
+            else:
+                date_str = "?"
+            lines.append(f"**{i+1}.** {name} ({date_str})")
+        embed = discord.Embed(
+            title="📊 Последние патчи Dota 2",
+            description=(
+                "Нажмите кнопку ниже, чтобы увидеть **подробные изменения** конкретного патча.\n\n"
+                + "\n".join(lines)
+            ),
+            color=0x8B4513)
+        return embed
+
+    @discord.ui.button(label="1️⃣", style=discord.ButtonStyle.primary, custom_id="patch:view:0")
+    async def btn1(self, interaction, button): await self._show_patch(interaction, 0)
+
+    @discord.ui.button(label="2️⃣", style=discord.ButtonStyle.primary, custom_id="patch:view:1")
+    async def btn2(self, interaction, button): await self._show_patch(interaction, 1)
+
+    @discord.ui.button(label="3️⃣", style=discord.ButtonStyle.primary, custom_id="patch:view:2")
+    async def btn3(self, interaction, button): await self._show_patch(interaction, 2)
+
+    @discord.ui.button(label="4️⃣", style=discord.ButtonStyle.primary, custom_id="patch:view:3")
+    async def btn4(self, interaction, button): await self._show_patch(interaction, 3)
+
+    @discord.ui.button(label="5️⃣", style=discord.ButtonStyle.primary, custom_id="patch:view:4")
+    async def btn5(self, interaction, button): await self._show_patch(interaction, 4)
+
+    async def _show_patch(self, interaction, index):
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.opendota.com/api/patches",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        patches = data[-5:][::-1] if data else []
+                        if index >= len(patches):
+                            await interaction.response.send_message("❌ Патч не найден.", ephemeral=True)
+                            return
+                        p = patches[index]
+                        name = p.get("name", "?")
+                        date_ts = p.get("release_date", 0)
+                        if date_ts:
+                            from datetime import datetime
+                            date_str = datetime.utcfromtimestamp(date_ts).strftime("%d.%m.%Y")
+                        else:
+                            date_str = "?"
+                        url = p.get("url", "")
+                        embed = discord.Embed(
+                            title=f"📊 {name}",
+                            description=f"**Дата:** {date_str}\n**Полный список изменений:** [dota2.com]({url})" if url else f"**Дата:** {date_str}",
+                            color=0x8B4513)
+                        # показатьHeroes/Items/Изменения если есть
+                        for section in ("heroes", "items", "general"):
+                            changes = p.get(section, [])
+                            if changes:
+                                lines = [f"• {c}" if isinstance(c, str) else f"• {c.get('name', c.get('hero', '?'))}" for c in changes[:15]]
+                                title_map = {"heroes": "🦸 Герои", "items": "🗡 Предметы", "general": "⚙️ Общие изменения"}
+                                embed.add_field(name=title_map.get(section, section),
+                                              value="\n".join(lines) if lines else "—", inline=False)
+                        if not any(p.get(s) for s in ("heroes", "items", "general")):
+                            embed.add_field(name="ℹ️", value="Подробности на сайте dota2.com", inline=False)
+                        view = PatchViewPage(p, index, len(patches))
+                        await interaction.response.edit_message(embed=embed, view=view)
+                        return
+        except Exception as e:
+            print(f"[PATCH] Error: {e}")
+        await interaction.response.send_message("❌ Ошибка загрузки патча.", ephemeral=True)
+
+
 # ---------------- 🤖 панель управления ботом ----------------
 
 class PanelView(discord.ui.View):
@@ -1880,6 +2045,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(VoiceRoomCreateView(self.db))
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(PanelView(self.bot))
+        self.bot.add_view(PatchListView())
         self.bot.add_view(VoiceReportView())
         self.bot.add_view(QuickMatchView(self.db))
         self.bot.add_view(QuickMatchCancelView(0))
@@ -2901,58 +3067,40 @@ class ServerManagement(commands.Cog):
                 "ниже, бот выберет за вас.",
                 view=HeroRollView())
 
-        # ---- 🎙 Голосовые комнаты (категория + канал создания) ----
+        # ---- 🎙 Голосовые комнаты: ОДИН пин с 3 кнопками ----
         jtc_category = discord.utils.get(guild.categories, name=JOIN_TO_CREATE_CATEGORY)
         if not jtc_category:
             jtc_category = await guild.create_category(JOIN_TO_CREATE_CATEGORY)
         await jtc_category.set_permissions(everyone, view_channel=False)
         await jtc_category.set_permissions(verified, view_channel=True, connect=True, stream=True)
 
-        # ---- канал создания голосовых комнат ----
         vr_create = discord.utils.get(guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
         if not vr_create:
             vr_create = await guild.create_text_channel(
                 VOICE_ROOM_CREATE_CHANNEL, category=jtc_category, position=0)
         await vr_create.set_permissions(everyone, send_messages=False)
         await vr_create.set_permissions(verified, send_messages=False)
-        vr_pinned = await vr_create.pins()
-        vr_embed = discord.Embed(
-            title="🎙 Создать голосовую комнату",
+
+        vr_combined_embed = discord.Embed(
+            title="🎙 Голосовые комнаты",
             description=(
-                "Нажмите кнопку ниже, чтобы создать свою голосовую комнату.\n\n"
-                "**Как работает:**\n"
-                "1. Выберите режим и ранг\n"
-                "2. Нажмите «Создать»\n"
-                "3. Комната появится в вашей ранговой категории\n\n"
-                "Комната удалится автоматически, когда все выйдут."
+                "**═══ ГОЛОСОВЫЕ КОМНАТЫ ═══**\n"
+                "🎙 Создать комнату — создайте свою войс-комнату с настройкой ранга и режима\n"
+                "⚡ Найти тиму — когда соберётся 5 человек, бот создаст войс и перенесёт всех\n"
+                "📊 Патчи Dota 2 — последние 5 патчей с подробными изменениями"
             ),
             color=0x2B2D31)
-        if not vr_pinned:
-            vr_msg = await vr_create.send(embed=vr_embed, view=VoiceRoomCreateView(self.db))
-            try:
-                await vr_msg.pin()
-            except discord.Forbidden:
-                pass
-
-        # ---- ⚡ быстрый матч ----
-        qm_embed = discord.Embed(
-            title="⚡ Быстрый матч",
-            description=(
-                "Нажмите кнопку, чтобы найти тиму!\n\n"
-                "Когда соберётся 5 человек — бот создаст войс-комнату\n"
-                "и перенесёт всех туда."
-            ),
-            color=0x8B4513)
-        qm_pins = await vr_create.pins()
-        has_qm = any(
-            e.title == "⚡ Быстрый матч" for p in qm_pins if p.embeds
-            for e in [p.embeds[0]] if hasattr(e, 'title'))
-        if not has_qm:
-            qm_msg = await vr_create.send(embed=qm_embed, view=QuickMatchView(self.db))
-            try:
-                await qm_msg.pin()
-            except discord.Forbidden:
-                pass
+        vr_combined_view = discord.ui.View()
+        vr_combined_view.add_item(discord.ui.Button(
+            label="Создать комнату", emoji="🎙",
+            style=discord.ButtonStyle.success, custom_id="voice:create_room"))
+        vr_combined_view.add_item(discord.ui.Button(
+            label="Найти тиму", emoji="⚡",
+            style=discord.ButtonStyle.primary, custom_id="quick_match:start"))
+        vr_combined_view.add_item(discord.ui.Button(
+            label="Патчи Dota 2", emoji="📊",
+            style=discord.ButtonStyle.secondary, custom_id="patch:list"))
+        await post_pinned_info_with_view(vr_create, vr_combined_embed, vr_combined_view)
 
         # ---- канал жалоб ----
         report_ch = discord.utils.get(guild.text_channels, name=VOICE_REPORT_CHANNEL)
@@ -3025,92 +3173,164 @@ class ServerManagement(commands.Cog):
         elif mod_log.category != staff_category:
             await mod_log.edit(category=staff_category)
 
-        # ---- закреплённые справки (ЛФГ, лидерборд, ивенты — сразу с кнопками) ----
-        for ch_name, (title, text) in PINNED_INFO.items():
-            ch = discord.utils.get(guild.text_channels, name=ch_name)
-            if not ch:
-                continue
-            if ch_name == LFG_CHANNEL:
-                await post_pinned_info(ch, title, text, view=LFGPanelView())
-            elif ch_name == LEADERBOARD_CHANNEL:
-                await post_pinned_info(ch, title, text, view=LeaderboardPanelView(self.db))
-            elif ch_name == WEEKLY_META_CHANNEL:
-                await post_pinned_info(ch, title, text, view=NotifyRoleView())
-            elif ch_name == "🎉-ивенты":
-                await post_pinned_info(ch, title, text, view=CalendarView())
-            else:
-                await post_pinned_info(ch, title, text)
+        # ---- 📌 объединённые пины (ОДИН пин на канал вместо разрозненных) ----
 
-        # ---- 🏆 лидерборд: ОДИН пин с 4 кнопками (вместо 4 отдельных) ----
-        lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
-        if lb_ch:
-            lb_pins = await lb_ch.pins()
-            has_lb_combined = any(
-                e.title == "🏆 Панель сервера" for p in lb_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_lb_combined:
-                lb_combined_embed = discord.Embed(
-                    title="🏆 Панель сервера",
-                    description=(
-                        "**Вся статистика в одном месте**\n"
-                        "Нажмите кнопку ниже, чтобы получить информацию."
-                    ),
-                    color=0x8B4513)
-                lb_combined_view = discord.ui.View()
-                lb_combined_view.add_item(discord.ui.Button(
-                    label="Показать лидерборд", emoji="🏆",
-                    style=discord.ButtonStyle.primary, custom_id="leaderboard:show"))
-                lb_combined_view.add_item(discord.ui.Button(
-                    label="Мои матчи", emoji="📊",
-                    style=discord.ButtonStyle.secondary, custom_id="matches:my"))
-                lb_combined_view.add_item(discord.ui.Button(
-                    label="Мой прогресс", emoji="📈",
-                    style=discord.ButtonStyle.secondary, custom_id="mmr:progress"))
-                lb_combined_view.add_item(discord.ui.Button(
-                    label="Стать дуэлянтом", emoji="⚔️",
-                    style=discord.ButtonStyle.primary, custom_id="duelist:toggle"))
-                lb_msg = await lb_ch.send(embed=lb_combined_embed, view=lb_combined_view)
-                try:
-                    await lb_msg.pin()
-                except discord.Forbidden:
-                    pass
+        # -- 📢 объявления: оповещения --
+        announce_ch = discord.utils.get(guild.text_channels, name="📢-объявления")
+        if announce_ch:
+            await post_pinned_info(
+                announce_ch, "📢 Объявления",
+                "Здесь бот и модераторы публикуют важные новости: патчи, турниры сервера, изменения ролей.\n\n"
+                "**🔔 Нажмите кнопку, чтобы подписаться/отписаться от уведомлений.**",
+                view=NotifyRoleView())
 
-        # ---- 📜 правила: ОДИН пин с 3 кнопками (вместо 4 отдельных) ----
+        # -- 📜 правила: ОДИН пин с 3 кнопками --
         rules_ch = discord.utils.get(guild.text_channels, name="📜-правила")
         if rules_ch:
-            rules_pins = await rules_ch.pins()
-            has_rules_combined = any(
-                e.title == "📜 Правила и навигация" for p in rules_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_rules_combined:
-                rules_combined_embed = discord.Embed(
-                    title="📜 Правила и навигация",
-                    description=(
-                        "1. Уважайте других игроков — без оскорблений и токсичности.\n"
-                        "2. Репорт в игре ≠ репорт здесь — жалобы через Valve.\n"
-                        "3. Флуд и реклама сторонних серверов — бан.\n"
-                        "4. Роль по рангу выдаётся автоматически, обновляется раз в сутки.\n"
-                        "5. Спорные ситуации — в #🛠-mod-log.\n\n"
-                        "Нажмите кнопку ниже для подробной информации."
-                    ),
-                    color=0x8B4513)
-                rules_combined_view = discord.ui.View()
-                rules_combined_view.add_item(discord.ui.Button(
-                    label="Навигация по серверу", emoji="📋",
-                    style=discord.ButtonStyle.success, custom_id="navigation:show"))
-                rules_combined_view.add_item(discord.ui.Button(
-                    label="Частые вопросы", emoji="❓",
-                    style=discord.ButtonStyle.primary, custom_id="faq:show"))
-                rules_combined_view.add_item(discord.ui.Button(
-                    label="Наставники", emoji="🤝",
-                    style=discord.ButtonStyle.secondary, custom_id="mentor:list"))
-                rules_msg = await rules_ch.send(embed=rules_combined_embed, view=rules_combined_view)
-                try:
-                    await rules_msg.pin()
-                except discord.Forbidden:
-                    pass
+            rules_combined_embed = discord.Embed(
+                title="📜 Правила сервера",
+                description=(
+                    "**═══ ПРАВИЛА ═══**\n"
+                    "1. Уважайте других игроков — без оскорблений и токсичности.\n"
+                    "2. Репорт в игре ≠ репорт здесь — жалобы через Valve.\n"
+                    "3. Флуд и реклама сторонних серверов — бан.\n"
+                    "4. Роль по рангу выдаётся автоматически, обновляется раз в сутки.\n"
+                    "5. Спорные ситуации — в #🛠-mod-log.\n\n"
+                    "**═══ КНОПКИ ═══**"
+                ),
+                color=0x8B4513)
+            rules_combined_view = discord.ui.View()
+            rules_combined_view.add_item(discord.ui.Button(
+                label="Навигация по серверу", emoji="📋",
+                style=discord.ButtonStyle.success, custom_id="navigation:show"))
+            rules_combined_view.add_item(discord.ui.Button(
+                label="Частые вопросы", emoji="❓",
+                style=discord.ButtonStyle.primary, custom_id="faq:show"))
+            rules_combined_view.add_item(discord.ui.Button(
+                label="Наставники", emoji="🤝",
+                style=discord.ButtonStyle.secondary, custom_id="mentor:list"))
+            await post_pinned_info_with_view(
+                rules_ch, rules_combined_embed, rules_combined_view)
 
-        # ---- календарь теперь вшит в пин ивентов (см. PINNED_INFO) ----
+        # -- 🔍 лфг --
+        lfg_ch = discord.utils.get(guild.text_channels, name=LFG_CHANNEL)
+        if lfg_ch:
+            await post_pinned_info(
+                lfg_ch, "🔍 Как искать пати",
+                "Нажмите кнопку ниже — бот создаст отдельный тред под ваш сбор "
+                "группы вместо флуда сообщениями в общем канале. Тред архивируется через час.",
+                view=LFGPanelView())
+
+        # -- 🧠 стратегия: ОДИН пин с кнопками стратегии --
+        strat_ch = discord.utils.get(guild.text_channels, name="🧠-стратегия")
+        if strat_ch:
+            strat_embed = discord.Embed(
+                title="🧠 Стратегия и аналитика",
+                description=(
+                    "**═══ АНАЛИТИКА ═══**\n"
+                    "🔥 Мета героев — топ-10 по пикрейту\n"
+                    "🛡 Контр-пики — кого брать против врага\n"
+                    "⚔️ Сравнить героев — подробное сравнение\n"
+                    "📋 Разбор игры — анализ вашего последнего матча"
+                ),
+                color=0x8B4513)
+            strat_view = discord.ui.View()
+            strat_view.add_item(discord.ui.Button(
+                label="Мета героев", emoji="🔥",
+                style=discord.ButtonStyle.secondary, custom_id="dota:meta"))
+            strat_view.add_item(discord.ui.Button(
+                label="Контр-пики", emoji="🛡",
+                style=discord.ButtonStyle.secondary, custom_id="dota:counterpick"))
+            strat_view.add_item(discord.ui.Button(
+                label="Сравнить", emoji="⚔️",
+                style=discord.ButtonStyle.secondary, custom_id="dota:compare"))
+            strat_view.add_item(discord.ui.Button(
+                label="Разбор игры", emoji="📋",
+                style=discord.ButtonStyle.secondary, custom_id="dota:last_review"))
+            await post_pinned_info_with_view(strat_ch, strat_embed, strat_view)
+
+        # -- 🏆 лидерборд: ОДИН пин с 4 кнопками --
+        lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
+        if lb_ch:
+            lb_combined_embed = discord.Embed(
+                title="🏆 Статистика сервера",
+                description=(
+                    f"**═══ СТАТИСТИКА ═══**\n"
+                    f"🏆 Топ-10 по винрейту (мин. {LEADERBOARD_MIN_GAMES} игр)\n"
+                    "📊 Мои матчи — история ваших игр\n"
+                    "📈 Мой прогресс — динамика MMR\n"
+                    "⚔️ Стать дуэлянтом — роль для недельных дуэлей"
+                ),
+                color=0x8B4513)
+            lb_combined_view = discord.ui.View()
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Показать лидерборд", emoji="🏆",
+                style=discord.ButtonStyle.primary, custom_id="leaderboard:show"))
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Мои матчи", emoji="📊",
+                style=discord.ButtonStyle.secondary, custom_id="matches:my"))
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Мой прогресс", emoji="📈",
+                style=discord.ButtonStyle.secondary, custom_id="mmr:progress"))
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Стать дуэлянтом", emoji="⚔️",
+                style=discord.ButtonStyle.primary, custom_id="duelist:toggle"))
+            await post_pinned_info_with_view(lb_ch, lb_combined_embed, lb_combined_view)
+
+        # -- 💬 чат --
+        chat_ch = discord.utils.get(guild.text_channels, name="💬-чат")
+        if chat_ch:
+            await post_pinned_info(
+                chat_ch, "💬 Чат сервера",
+                "Общайтесь на темы Dota 2, делитесь опытом и просто болтайте.\n"
+                "Слоумод: 5 секунд между сообщениями.")
+
+        # -- 🎉 ивенты: ОДИН пин с кнопками календаря, стримов, квеста и опроса --
+        if events_ch:
+            events_embed = discord.Embed(
+                title="🎉 Ивенты сервера",
+                description=(
+                    "**═══ ИВЕНТЫ ═══**\n"
+                    "📅 Календарь — расписание турниров и мероприятий\n"
+                    "📺 Стримы — нажмите, чтобы получить роль стримера\n"
+                    "🐲 Вопрос дня — ответьте и получите роль знатока\n"
+                    "🗳 Опрос дня — голосуйте за лучший ответ\n\n"
+                    "Слоумод: 30 сек — только важные новости."
+                ),
+                color=0x8B4513)
+            events_view = discord.ui.View()
+            events_view.add_item(discord.ui.Button(
+                label="Календарь", emoji="📅",
+                style=discord.ButtonStyle.primary, custom_id="calendar:show"))
+            events_view.add_item(discord.ui.Button(
+                label="Стримлю", emoji="📺",
+                style=discord.ButtonStyle.secondary, custom_id="streams:toggle"))
+            events_view.add_item(discord.ui.Button(
+                label="Ответить на вопрос дня", emoji="🐲",
+                style=discord.ButtonStyle.success, custom_id="daily_quest:answer"))
+            events_view.add_item(discord.ui.Button(
+                label="Проголосовать", emoji="🗳",
+                style=discord.ButtonStyle.primary, custom_id="poll:vote"))
+            await post_pinned_info_with_view(events_ch, events_embed, events_view)
+
+        # -- 🐲 бестиарий --
+        if hero_roll_ch:
+            bestiary_embed = discord.Embed(
+                title="🐲 Бестиарий героев",
+                description=(
+                    "**═══ БЕСТИАРИЙ ═══**\n"
+                    "Обсуждайте героев здесь.\n"
+                    "🎲 Нажмите кнопку — бот выберет случайного героя для игры."
+                ),
+                color=0x8B4513)
+            await post_pinned_info_with_view(
+                hero_roll_ch, bestiary_embed, HeroRollView())
+
+        # -- 📊 патчи: список последних 5 патчей --
+        patch_ch = discord.utils.get(guild.text_channels, name="📊-патчи")
+        if patch_ch:
+            patch_embed = await PatchListView().build_embed()
+            await post_pinned_info_with_view(patch_ch, patch_embed, PatchListView())
 
         # ---- ⚠️ модерация кнопки (staff-only канал) ----
         mod_tools_ch = discord.utils.get(guild.text_channels, name="🛠-инструменты")
@@ -3141,74 +3361,7 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # ---- навигация теперь вшита в пин правил (см. rules_combined) ----
-
-        # ---- 📺 стримы (в ивенты) ----
-        events_ch = discord.utils.get(guild.text_channels, name=STREAMS_CHANNEL)
-        if events_ch:
-            stream_embed = discord.Embed(
-                title="📺 Стримы сервера",
-                description=(
-                    "Начали стрим? Нажмите кнопку — получите роль «📺 Стример» "
-                    "и вас увидят в этом канале!"
-                ),
-                color=0x8B4513)
-            ev_pins = await events_ch.pins()
-            has_stream = any(
-                e.title == "📺 Стримы сервера" for p in ev_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_stream:
-                stream_msg = await events_ch.send(embed=stream_embed, view=StreamButtonView())
-                try:
-                    await stream_msg.pin()
-                except discord.Forbidden:
-                    pass
-
-        # ---- 🐲 квест дня (в ивенты) ----
-        if events_ch:
-            today = discord.utils.utcnow().date().isoformat()
-            idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(DAILY_QUEST_QUESTIONS)
-            q = DAILY_QUEST_QUESTIONS[idx]
-            quest_embed = discord.Embed(
-                title="🐲 Вопрос дня",
-                description=q["q"],
-                color=0x8B4513)
-            options_text = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(q["options"]))
-            quest_embed.add_field(name="Варианты:", value=options_text, inline=False)
-            quest_embed.set_footer(text="Нажмите кнопку, чтобы ответить!")
-            ev_pins = await events_ch.pins()
-            has_quest = any(
-                e.title == "🐲 Вопрос дня" for p in ev_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_quest:
-                quest_msg = await events_ch.send(embed=quest_embed, view=DailyQuestView())
-                try:
-                    await quest_msg.pin()
-                except discord.Forbidden:
-                    pass
-
-        # ---- 🗳 опрос дня (в ивенты) ----
-        if events_ch:
-            today = discord.utils.utcnow().date().isoformat()
-            pidx = int(hashlib.md5(("poll_" + today).encode()).hexdigest(), 16) % len(DAILY_POLL_QUESTIONS)
-            pq = DAILY_POLL_QUESTIONS[pidx]
-            poll_embed = discord.Embed(
-                title="🗳 Опрос дня",
-                description=pq["q"],
-                color=0x8B4513)
-            poll_options = "\n".join(f"**{i+1}.** {opt}" for i, opt in enumerate(pq["options"]))
-            poll_embed.add_field(name="Варианты:", value=poll_options, inline=False)
-            poll_embed.set_footer(text="Нажмите кнопку, чтобы проголосовать!")
-            ev_pins = await events_ch.pins()
-            has_poll = any(
-                e.title == "🗳 Опрос дня" for p in ev_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_poll:
-                poll_msg = await events_ch.send(embed=poll_embed, view=DailyPollView())
-                try:
-                    await poll_msg.pin()
-                except discord.Forbidden:
-                    pass
+        # ---- навигация теперь вшита в пин правил ----
 
         # ---- темы каналов (визуальное оформление) ----
         for ch_name, topic in CHANNEL_TOPICS.items():
@@ -3313,18 +3466,8 @@ class ServerManagement(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-        # ---- удаление старых пинов бота (кнопки/embeds из прошлых конфигураций) ----
+        # ---- удаление всех старых пинов бота в категориях бота ----
         me = guild.me
-        known_pins = {
-            "📜 Правила сервера", "👋 Добро пожаловать", "🎮 Создать голосовую комнату",
-            "📊 Статистика сервера", "🏆 Лидерборд", "🎮 Игровые комнаты",
-            "📈 Аналитика патча", "📋 Мониторинг изменений", "🎯 Ищу подъём",
-            "🤝 Система наставников", "🎭 Выберите роли интересов", "🤖 Панель управления ботом",
-            "🗑️ Очистка чата", "🛠 Панель модерации", "🎉 Ивенты и турниры",
-            "📅 Календарь сервера", "🎮 Гостевая зона", "🔧 Настройка голосовых комнат",
-            "📊 Мета недели: топ-5 героев по пикрейту",
-            "📊 Аналитика патча: кто выиграл, кто проиграл",
-        }
         cleaned_pins = 0
         for ch in list(guild.text_channels):
             if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
@@ -3336,20 +3479,14 @@ class ServerManagement(commands.Cog):
             for p in pins:
                 if p.author.id != me.id:
                     continue
-                has_known_title = (p.embeds and p.embeds[0].title in known_pins)
-                has_buttons = bool(p.components)
-                if not has_known_title and not has_buttons:
-                    continue
-                # удалить пины со старыми кнопками (не из текущей конфигурации)
-                if has_buttons and has_known_title:
-                    # проверяем есть ли view для этого пина — если нет, удаляем
+                # удалить все пины бота — пересоздадим актуальные
+                try:
+                    await p.unpin()
+                    cleaned_pins += 1
+                except discord.Forbidden:
                     pass
-                elif not has_known_title and has_buttons:
-                    try:
-                        await p.unpin()
-                        cleaned_pins += 1
-                    except discord.Forbidden:
-                        pass
+        if DEBUG_LOG and cleaned_pins:
+            print(f"[SETUP] Очищено {cleaned_pins} старых пинов бота")
 
         await ctx.send(
             f"Готово! Настроены: Начало, Арена, Стратегия, Игровое, Магазин, "
