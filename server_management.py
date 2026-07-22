@@ -1034,7 +1034,6 @@ async def _start_quick_match(guild: discord.Guild, storage: Storage):
     vc = await guild.create_voice_channel(
         f"⚡ Матч — {names}", category=jtc_category, user_limit=5,
         overwrites=overwrites, reason="Быстрый матч")
-    storage.protect_voice_target(vc.id, guild.id, "voice")
 
     try:
         ch = discord.utils.get(guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
@@ -1773,6 +1772,7 @@ class ServerManagement(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db = db  # общий экземпляр с dota_stats_v3
+        self._pending_deletes: dict[int, asyncio.Task] = {}  # channel_id -> scheduled delete task
         self.resync_ranks.start()
         self.auto_purge.start()
         self.update_stats_channels.start()
@@ -2035,18 +2035,33 @@ class ServerManagement(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member,
                                      before: discord.VoiceState, after: discord.VoiceState):
-        # удаление опустевших временных каналов
+        # удаление опустевших временных каналов (с задержкой 1 минута)
         if before.channel:
             is_bot_managed = self.db.is_managed_voice_channel(before.channel.id)
             is_protected = self.db.is_voice_protected(
                 before.channel.id, before.channel.category_id if before.channel.category else None,
                 before.channel.guild.id)
-            if is_bot_managed and not is_protected and len(before.channel.members) == 0:
-                try:
-                    await before.channel.delete(reason="Временный войс опустел")
-                except discord.NotFound:
-                    pass
-                self.db.unregister_voice_channel(before.channel.id)
+            ch_id = before.channel.id
+            if is_bot_managed and not is_protected:
+                if len(before.channel.members) == 0:
+                    # запланировать удаление через 1 минуту (если ещё не запланировано)
+                    if ch_id not in self._pending_deletes:
+                        async def _delayed_delete(channel_id: int = ch_id):
+                            await asyncio.sleep(60)
+                            self._pending_deletes.pop(channel_id, None)
+                            ch = self.bot.get_channel(channel_id)
+                            if ch and len(ch.members) == 0:
+                                try:
+                                    await ch.delete(reason="Временный войс опустел")
+                                except discord.NotFound:
+                                    pass
+                                self.db.unregister_voice_channel(channel_id)
+                        self._pending_deletes[ch_id] = asyncio.create_task(_delayed_delete())
+                else:
+                    # кто-то зашёл — отменить запланированное удаление
+                    task = self._pending_deletes.pop(ch_id, None)
+                    if task and not task.done():
+                        task.cancel()
 
     # ---------- треды вместо спама в ЛФГ ----------
 
@@ -2295,6 +2310,120 @@ class ServerManagement(commands.Cog):
         except discord.Forbidden:
             pass
         await ctx.send("✅ Панель аналитики патчей закреплена!", delete_after=5)
+
+    # ---------- 🤖 панель управления ботом ----------
+
+    @commands.command(name="bot_panel")
+    @commands.has_permissions(administrator=True)
+    async def bot_panel(self, ctx: commands.Context):
+        """Закрепляет панель управления ботом в текущем канале.
+        Использование: !bot_panel"""
+        embed = discord.Embed(
+            title="🤖 Панель управления ботом",
+            description="Все команды и настройки бота в одном месте.",
+            color=0x2B2D31)
+        embed.add_field(
+            name="⚙️ Настройка",
+            value=(
+                "`!dota_server_setup` — полная настройка сервера\n"
+                "`!dota_patch_panel` — панель аналитики патчей\n"
+                "`!bot_panel` — эта панель"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🧹 Утилиты",
+            value=(
+                "`!dota_players` — список привязанных игроков\n"
+                "`!dota_link_player @user SteamID` — привязка от админа\n"
+                "`!leaderboard` — лидерборд (текстовая команда)"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🔧 Модерация",
+            value=(
+                "Кнопки в #🛠-инструменты: предупреждения и таймауты"
+            ),
+            inline=False)
+        embed.add_field(
+            name="🧹 Очистка",
+            value=(
+                "`!dota_cleanup` — удалить каналы вне конфигурации\n"
+                "⚠️ Безвозвратно удаляет все каналы/категории,\n"
+                "которые не входят в структуру бота."
+            ),
+            inline=False)
+        embed.set_footer(text="Только для администраторов")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label="Настройка сервера", emoji="⚙️",
+            style=discord.ButtonStyle.danger,
+            custom_id="admin:server_setup",
+            url=f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}"))
+        msg = await ctx.send(embed=embed, view=view)
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            pass
+        await ctx.send("✅ Панель бота закреплена!", delete_after=5)
+
+    # ---------- 🧹 ручная очистка каналов ----------
+
+    @commands.command(name="dota_cleanup")
+    @commands.has_permissions(administrator=True)
+    async def dota_cleanup(self, ctx: commands.Context):
+        """Удаляет все каналы и категории, не входящие в конфигурацию бота.
+        Использование: !dota_cleanup"""
+        guild = ctx.guild
+
+        BOT_CATEGORY_NAMES = {
+            INFO_CATEGORY, COMMUNITY_CATEGORY, STRATEGY_CATEGORY, GAME_CATEGORY,
+            SHOP_CATEGORY, JOIN_TO_CREATE_CATEGORY, STATS_CATEGORY, STAFF_CATEGORY,
+            GUEST_CATEGORY,
+        } | set(RANK_GROUPS.keys())
+
+        to_delete_channels = []
+        to_delete_categories = []
+
+        for ch in guild.channels:
+            if ch.type == discord.ChannelType.category:
+                if ch.name not in BOT_CATEGORY_NAMES and ch.name != STAFF_CATEGORY:
+                    to_delete_categories.append(ch)
+                continue
+            if ch.category and ch.category.name in BOT_CATEGORY_NAMES:
+                continue
+            if ch.category and ch.category.name == STAFF_CATEGORY:
+                continue
+            to_delete_channels.append(ch)
+
+        total = len(to_delete_channels) + len(to_delete_categories)
+        if total == 0:
+            await ctx.send("✅ Лишних каналов не найдено.")
+            return
+
+        await ctx.send(f"⚠️ Будет удалено: {len(to_delete_channels)} каналов, "
+                       f"{len(to_delete_categories)} категорий. Продолжаю...")
+
+        deleted = 0
+        for ch in to_delete_channels:
+            try:
+                await ch.delete(reason="dota_cleanup")
+                deleted += 1
+            except discord.HTTPException:
+                pass
+        for cat in to_delete_categories:
+            for sub in list(cat.channels):
+                try:
+                    await sub.delete(reason="dota_cleanup")
+                    deleted += 1
+                except discord.HTTPException:
+                    pass
+            try:
+                await cat.delete(reason="dota_cleanup")
+                deleted += 1
+            except discord.HTTPException:
+                pass
+
+        await ctx.send(f"🧹 Готово! Удалено: {deleted} элементов.")
 
     # ---------- проверка базы привязанных игроков ----------
 
