@@ -3228,7 +3228,7 @@ class ServerManagement(commands.Cog):
                 style=discord.ButtonStyle.secondary, custom_id="dota:last_review"))
             await post_pinned_info_with_view(strat_ch, strat_embed, strat_view)
 
-        # -- 🏆 лидерборд: ОДИН пин с 4 кнопками --
+        # -- 🏆 лидерборд: ОДИН пин с кнопками --
         lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
         if lb_ch:
             lb_combined_embed = discord.Embed(
@@ -3237,8 +3237,11 @@ class ServerManagement(commands.Cog):
                     f"**═══ СТАТИСТИКА ═══**\n"
                     f"🏆 Топ-10 по винрейту (мин. {LEADERBOARD_MIN_GAMES} игр)\n"
                     "📊 Мои матчи — история ваших игр\n"
-                    "📈 Мой прогресс — динамика MMR\n"
-                    "⚔️ Стать дуэлянтом — роль для недельных дуэлей"
+                    "📈 Мой прогресс — динамика MMR\n\n"
+                    "**═══ СОРЕВНОВАНИЯ ═══**\n"
+                    "🥊 Топ дуэлянтов — рейтинг игроков\n"
+                    "⚔️ Турнир — создать / записаться\n"
+                    "🛡 Стать дуэлянтом — роль для недельных дуэлей"
                 ),
                 color=0x8B4513)
             lb_combined_view = discord.ui.View(timeout=None)
@@ -3252,7 +3255,13 @@ class ServerManagement(commands.Cog):
                 label="Мой прогресс", emoji="📈",
                 style=discord.ButtonStyle.secondary, custom_id="mmr:progress"))
             lb_combined_view.add_item(discord.ui.Button(
-                label="Стать дуэлянтом", emoji="⚔️",
+                label="Топ дуэлянтов", emoji="🥊",
+                style=discord.ButtonStyle.success, custom_id="dota:duel_top"))
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Турнир", emoji="⚔️",
+                style=discord.ButtonStyle.success, custom_id="dota:tournament"))
+            lb_combined_view.add_item(discord.ui.Button(
+                label="Стать дуэлянтом", emoji="🛡",
                 style=discord.ButtonStyle.primary, custom_id="duelist:toggle"))
             await post_pinned_info_with_view(lb_ch, lb_combined_embed, lb_combined_view)
 
