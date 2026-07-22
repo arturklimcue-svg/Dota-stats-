@@ -726,7 +726,12 @@ class VoiceRoomSetupView(discord.ui.View):
                 view_channel=True, connect=True, manage_channels=True, stream=True),
         }
 
-        if self.rank != "any" and self.rank in RANK_ORDER:
+        if self.rank == "any":
+            verified = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
+            if verified:
+                overwrites[verified] = discord.PermissionOverwrite(
+                    view_channel=True, connect=True, speak=True, stream=True)
+        else:
             idx = RANK_ORDER.index(self.rank)
             allowed_ranks = RANK_ORDER[max(0, idx - 1):idx + 1]
             for tier_num, tier_name in RANK_TIER_NAMES.items():
@@ -741,7 +746,6 @@ class VoiceRoomSetupView(discord.ui.View):
             overwrites=overwrites,
             reason=f"Создано {member}: {mode_label}, {rank_label}, {self.size} мест")
         self.db.register_voice_channel(temp.id, guild.id)
-        self.db.protect_voice_target(temp.id, guild.id, "voice")
         await member.move_to(temp)
 
         if self.rank == "any":
