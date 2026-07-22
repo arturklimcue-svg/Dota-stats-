@@ -1973,6 +1973,9 @@ class PanelView(discord.ui.View):
         cleaned_pins = 0
         skipped_channels = []
         for ch in list(guild.text_channels):
+            # модерация — священная, не трогаем
+            if ch.category and ch.category.name == STAFF_CATEGORY:
+                continue
             # открепить пины бота
             try:
                 pins = await ch.pins()
