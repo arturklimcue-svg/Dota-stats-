@@ -2344,11 +2344,11 @@ class ServerManagement(commands.Cog):
 
     # ---------- 🤖 панель управления ботом ----------
 
-    @commands.command(name="bot_panel")
+    @commands.command(name="panel")
     @commands.has_permissions(administrator=True)
-    async def bot_panel(self, ctx: commands.Context):
+    async def cmd_panel(self, ctx: commands.Context):
         """Закрепляет панель управления ботом в текущем канале.
-        Использование: !bot_panel"""
+        Использование: !panel"""
         embed = discord.Embed(
             title="🤖 Панель управления ботом",
             description="Все команды и настройки бота в одном месте.",
@@ -2358,7 +2358,7 @@ class ServerManagement(commands.Cog):
             value=(
                 "`!dota_server_setup` — полная настройка сервера\n"
                 "`!dota_patch_panel` — панель аналитики патчей\n"
-                "`!bot_panel` — эта панель"
+                "`!panel` — эта панель"
             ),
             inline=False)
         embed.add_field(
