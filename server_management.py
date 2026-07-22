@@ -1960,6 +1960,55 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(
             "🧹 Выполните `!dota_cleanup` для удаления лишних каналов.", ephemeral=True)
 
+    @discord.ui.button(label="Удалить все сообщения бота", emoji="🗑",
+                        style=discord.ButtonStyle.danger, custom_id="admin:purge_bot_msgs")
+    async def purge_bot_msgs_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_admin(interaction):
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        me = guild.me
+        # Категории бота
+        BOT_CATEGORY_NAMES = {
+            "📋 Начало", "⚔️ Арена", "📊 Стратегия", "🎮 Игровое",
+            "🛒 Магазин", "🎙 Голосовые комнаты", "📊 Статистика",
+            "🎮 Гости", "🛠 Модерация",
+        }
+        # Добавляем ранговые
+        from dota_stats_v3 import RANK_GROUPS
+        BOT_CATEGORY_NAMES.update(RANK_GROUPS.keys())
+        cleaned_msgs = 0
+        cleaned_pins = 0
+        for ch in list(guild.text_channels):
+            if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
+                continue
+            # открепить пины бота
+            try:
+                pins = await ch.pins()
+            except discord.Forbidden:
+                pins = []
+            for p in pins:
+                if p.author.id == me.id:
+                    try:
+                        await p.unpin()
+                        cleaned_pins += 1
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            # удалить сообщения бота
+            try:
+                async for msg in ch.history(limit=200):
+                    if msg.author.id == me.id:
+                        try:
+                            await msg.delete()
+                            cleaned_msgs += 1
+                        except (discord.HTTPException, discord.NotFound):
+                            pass
+            except discord.Forbidden:
+                pass
+        await interaction.followup.send(
+            f"🗑 Удалено сообщений: {cleaned_msgs}, пинов: {cleaned_pins}", ephemeral=True)
+
 
 class PanelViewPurge(discord.ui.View):
     """Выпадающий список каналов для очистки."""
@@ -3490,7 +3539,7 @@ class ServerManagement(commands.Cog):
                         pass
             # удалить все сообщения бота
             try:
-                async for msg in ch.history(limit=200).flatten():
+                async for msg in ch.history(limit=200):
                     if msg.author.id == me.id:
                         try:
                             await msg.delete()
