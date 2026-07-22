@@ -2312,27 +2312,6 @@ class ServerManagement(commands.Cog):
 
     # ---------- треды вместо спама в ЛФГ ----------
 
-    @commands.command(name="party")
-    async def create_party(self, ctx: commands.Context, *, description: str = "Ищу пати"):
-        """Создаёт тред для сбора группы вместо флуда сообщениями в чате.
-        Тред автоматически архивируется через час неактивности."""
-        lfg_channel = discord.utils.get(ctx.guild.text_channels, name=LFG_CHANNEL)
-        if not lfg_channel:
-            await ctx.send(f"Канал #{LFG_CHANNEL} не найден. Запустите !dota_server_setup.")
-            return
-        anchor = await lfg_channel.send(f"🎮 {ctx.author.mention}: {description}")
-        thread = await anchor.create_thread(
-            name=f"Пати — {ctx.author.display_name}",
-            auto_archive_duration=PARTY_THREAD_ARCHIVE_MINUTES)
-        await thread.send(
-            f"Тред создан для {ctx.author.mention}. "
-            f"Автоархивация через {PARTY_THREAD_ARCHIVE_MINUTES} мин без сообщений — "
-            f"дальнейшее обсуждение ведите здесь, а не в основном чате.")
-        try:
-            await ctx.message.delete()
-        except discord.Forbidden:
-            pass
-
     # ---------- автоочистка каналов ----------
 
     @tasks.loop(minutes=PURGE_INTERVAL_MINUTES)
@@ -2570,13 +2549,6 @@ class ServerManagement(commands.Cog):
         await self.bot.wait_until_ready()
 
     # ---------- 🏆 лидерборд ----------
-
-    @commands.command(name="leaderboard")
-    async def leaderboard(self, ctx: commands.Context):
-        """Топ по винрейту среди привязанных участников этого сервера."""
-        async with ctx.typing():
-            embed = await build_leaderboard_embed(self.db, ctx.guild)
-        await ctx.send(embed=embed)
 
     # ---------- 📊 аналитика патчей ----------
 
