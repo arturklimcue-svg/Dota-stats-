@@ -1969,25 +1969,16 @@ class PanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         me = guild.me
-        # Категории бота
-        BOT_CATEGORY_NAMES = {
-            "📋 Начало", "⚔️ Арена", "📊 Стратегия", "🎮 Игровое",
-            "🛒 Магазин", "🎙 Голосовые комнаты", "📊 Статистика",
-            "🎮 Гости", "🛠 Модерация",
-        }
-        # Добавляем ранговые
-        from dota_stats_v3 import RANK_GROUPS
-        BOT_CATEGORY_NAMES.update(RANK_GROUPS.keys())
         cleaned_msgs = 0
         cleaned_pins = 0
+        skipped_channels = []
         for ch in list(guild.text_channels):
-            if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
-                continue
             # открепить пины бота
             try:
                 pins = await ch.pins()
             except discord.Forbidden:
-                pins = []
+                skipped_channels.append(ch.name)
+                continue
             for p in pins:
                 if p.author.id == me.id:
                     try:
@@ -2005,9 +1996,12 @@ class PanelView(discord.ui.View):
                         except (discord.HTTPException, discord.NotFound):
                             pass
             except discord.Forbidden:
-                pass
+                skipped_channels.append(ch.name)
+        print(f"[PANEL PURGE] guild={guild.id} msgs={cleaned_msgs} pins={cleaned_pins} skipped={skipped_channels}")
         await interaction.followup.send(
-            f"🗑 Удалено сообщений: {cleaned_msgs}, пинов: {cleaned_pins}", ephemeral=True)
+            f"🗑 Удалено сообщений: {cleaned_msgs}, пинов: {cleaned_pins}"
+            + (f"\n⚠️ Нет прав в: {', '.join(skipped_channels)}" if skipped_channels else ""),
+            ephemeral=True)
 
 
 class PanelViewPurge(discord.ui.View):
@@ -3518,18 +3512,16 @@ class ServerManagement(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-        # ---- удаление всех старых сообщений бота в категориях бота ----
+        # ---- удаление всех сообщений бота на ВСЕМ сервере ----
         me = guild.me
         cleaned = 0
         cleaned_pins = 0
         for ch in list(guild.text_channels):
-            if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
-                continue
-            # сначала открепить все пины бота (иначе удаление может не сработать)
+            # открепить пины бота
             try:
                 pins = await ch.pins()
             except discord.Forbidden:
-                pins = []
+                continue
             for p in pins:
                 if p.author.id == me.id:
                     try:
@@ -3548,8 +3540,7 @@ class ServerManagement(commands.Cog):
                             pass
             except discord.Forbidden:
                 pass
-        if DEBUG_LOG and cleaned:
-            print(f"[SETUP] Удалено {cleaned} сообщений, {cleaned_pins} пинов бота")
+        print(f"[SETUP] Удалено {cleaned} сообщений, {cleaned_pins} пинов бота")
 
         await ctx.send(
             f"Готово! Настроены: Начало, Арена, Стратегия, Игровое, Магазин, "
