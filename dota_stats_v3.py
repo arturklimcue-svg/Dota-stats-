@@ -3275,10 +3275,12 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
                         f"Нужно {GUILD_CREATE_COST} кристаллов для создания гильдии. "
                         f"У вас {bal}.", ephemeral=True)
                     return
+            # Валидация пройдена — defer перед тяжёлыми операциями
+            await interaction.response.defer(ephemeral=True)
             guild_id = self.db.create_guild(
                 interaction.guild.id, name, tag, interaction.user.id)
             if not guild_id:
-                await interaction.response.send_message("Ошибка создания гильдии.", ephemeral=True)
+                await interaction.followup.send("Ошибка создания гильдии.", ephemeral=True)
                 return
             if GUILD_CREATE_COST > 0:
                 self.db.spend_shards(interaction.user.id, GUILD_CREATE_COST, "guild_create")
@@ -3310,7 +3312,7 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
                     name=f"[{tag}]-чат",
                     category=arena_cat,
                     overwrites=overwrites,
-                    topic=f"Гильдия {name} —频道",
+                    topic=f"Гильдия {name}",
                     reason=f"Гильдия {name}")
             except Exception as e:
                 print(f"[GUILD] channel error: {e}")
@@ -3324,13 +3326,16 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
                 ),
                 color=0x8B4513)
             leader_view = GuildLeaderView(self.db, guild_id, interaction.user.id)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=embed, view=leader_view, ephemeral=True)
         except Exception as e:
             print(f"[GUILD] create_modal error: {e}")
             try:
                 if not interaction.response.is_done():
                     await interaction.response.send_message(
+                        "❌ Ошибка создания гильдии.", ephemeral=True)
+                else:
+                    await interaction.followup.send(
                         "❌ Ошибка создания гильдии.", ephemeral=True)
             except Exception:
                 pass
@@ -3409,96 +3414,118 @@ class GuildHubView(discord.ui.View):
     @discord.ui.button(label="Моя гильдия", emoji="🏰",
                         style=discord.ButtonStyle.primary, custom_id="guild:info")
     async def info_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        g = self.db.get_guild_by_member(interaction.user.id)
-        if not g:
-            await interaction.response.send_message(
-                "Вы не состоите ни в одной гильдии.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        members = self.db.get_guild_members(g["id"])
-        lines = []
-        role_icons = {"leader": "👑", "officer": "⭐", "member": "•"}
-        for m in members:
-            member = interaction.guild.get_member(m["discord_id"])
-            name = member.display_name if member else f"<@{m['discord_id']}>"
-            icon = role_icons.get(m["role"], "•")
-            lines.append(f"{icon} {name}")
-        # Статистика гильдии по играм
-        game_count = 0
-        win_count = 0
-        for m in members:
-            account = self.db.get_account_id(m["discord_id"])
-            if not account:
-                continue
-            matches = await od.get(f"/players/{account}/wl")
-            if matches:
-                game_count += matches.get("win", 0) + matches.get("lose", 0)
-                win_count += matches.get("win", 0)
-        wr = (win_count / game_count * 100) if game_count > 0 else 0
-        embed = discord.Embed(
-            title=f"🏰 [{g['tag']}] {g['name']}",
-            description=(
-                f"**Лидер:** <@{g['leader_id']}>\n"
-                f"**Участников:** {len(members)}\n"
-                f"**Всего игр:** {game_count}\n"
-                f"**Общий винрейт:** {wr:.1f}%\n"
-            ),
-            color=g.get("color") or 0x8B4513)
-        embed.add_field(
-            name="👥 Участники",
-            value="\n".join(lines[:20]) or "Нет данных",
-            inline=False)
-        view = None
-        my_role = self.db.get_guild_member(g["id"], interaction.user.id)
-        if my_role and my_role["role"] in ("leader", "officer"):
-            view = GuildLeaderView(self.db, g["id"], g["leader_id"])
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        try:
+            g = self.db.get_guild_by_member(interaction.user.id)
+            if not g:
+                await interaction.response.send_message(
+                    "Вы не состоите ни в одной гильдии.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            members = self.db.get_guild_members(g["id"])
+            lines = []
+            role_icons = {"leader": "👑", "officer": "⭐", "member": "•"}
+            for m in members:
+                member = interaction.guild.get_member(m["discord_id"])
+                name = member.display_name if member else f"<@{m['discord_id']}>"
+                icon = role_icons.get(m["role"], "•")
+                lines.append(f"{icon} {name}")
+            game_count = 0
+            win_count = 0
+            for m in members:
+                account = self.db.get_account_id(m["discord_id"])
+                if not account:
+                    continue
+                matches = await od.get(f"/players/{account}/wl")
+                if matches:
+                    game_count += matches.get("win", 0) + matches.get("lose", 0)
+                    win_count += matches.get("win", 0)
+            wr = (win_count / game_count * 100) if game_count > 0 else 0
+            embed = discord.Embed(
+                title=f"🏰 [{g['tag']}] {g['name']}",
+                description=(
+                    f"**Лидер:** <@{g['leader_id']}>\n"
+                    f"**Участников:** {len(members)}\n"
+                    f"**Всего игр:** {game_count}\n"
+                    f"**Общий винрейт:** {wr:.1f}%\n"
+                ),
+                color=g.get("color") or 0x8B4513)
+            embed.add_field(
+                name="👥 Участники",
+                value="\n".join(lines[:20]) or "Нет данных",
+                inline=False)
+            view = None
+            my_role = self.db.get_guild_member(g["id"], interaction.user.id)
+            if my_role and my_role["role"] in ("leader", "officer"):
+                view = GuildLeaderView(self.db, g["id"], g["leader_id"])
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"[GUILD] info_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Список гильдий", emoji="📋",
                         style=discord.ButtonStyle.secondary, custom_id="guild:list")
     async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        guilds = self.db.all_guilds(interaction.guild.id)
-        if not guilds:
-            await interaction.followup.send(
-                "Гильдий пока нет. Будьте первыми — создайте!", ephemeral=True)
-            return
-        lines = []
-        for g in guilds:
-            count = self.db.get_guild_member_count(g["id"])
-            leader = interaction.guild.get_member(g["leader_id"])
-            lname = leader.display_name if leader else f"<@{g['leader_id']}>"
-            lines.append(f"**[{g['tag']}]** {g['name']} — {count} чел. (лидер: {lname})")
-        embed = discord.Embed(
-            title="📋 Гильдии сервера",
-            description="\n".join(lines),
-            color=0x8B4513)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            guilds = self.db.all_guilds(interaction.guild.id)
+            if not guilds:
+                await interaction.followup.send(
+                    "Гильдий пока нет. Будьте первыми — создайте!", ephemeral=True)
+                return
+            lines = []
+            for g in guilds:
+                count = self.db.get_guild_member_count(g["id"])
+                leader = interaction.guild.get_member(g["leader_id"])
+                lname = leader.display_name if leader else f"<@{g['leader_id']}>"
+                lines.append(f"**[{g['tag']}]** {g['name']} — {count} чел. (лидер: {lname})")
+            embed = discord.Embed(
+                title="📋 Гильдии сервера",
+                description="\n".join(lines),
+                color=0x8B4513)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[GUILD] list_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Покинуть гильдию", emoji="🚪",
                         style=discord.ButtonStyle.danger, custom_id="guild:leave")
     async def leave_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        g = self.db.get_guild_by_member(interaction.user.id)
-        if not g:
-            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
-            return
-        if g["leader_id"] == interaction.user.id:
-            await interaction.response.send_message(
-                "Лидер не может покинуть гильдию — передайте лидерство или распустите её.",
-                ephemeral=True)
-            return
-        self.db.leave_guild(interaction.user.id)
-        # Убрать роль
         try:
-            role = interaction.guild.get_role(g["color"]) if g["color"] else None
-            if role:
-                await interaction.user.remove_roles(role, reason="Покинул гильдию")
-        except Exception:
-            pass
-        count = self.db.get_guild_member_count(g["id"])
-        await interaction.response.send_message(
-            f"Вы покинули **[{g['tag']}] {g['name']}**. ({count} участников)",
-            ephemeral=True)
+            g = self.db.get_guild_by_member(interaction.user.id)
+            if not g:
+                await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
+                return
+            if g["leader_id"] == interaction.user.id:
+                await interaction.response.send_message(
+                    "Лидер не может покинуть гильдию — передайте лидерство или распустите её.",
+                    ephemeral=True)
+                return
+            self.db.leave_guild(interaction.user.id)
+            try:
+                role = interaction.guild.get_role(g["color"]) if g["color"] else None
+                if role:
+                    await interaction.user.remove_roles(role, reason="Покинул гильдию")
+            except Exception:
+                pass
+            count = self.db.get_guild_member_count(g["id"])
+            await interaction.response.send_message(
+                f"Вы покинули **[{g['tag']}] {g['name']}**. ({count} участников)",
+                ephemeral=True)
+        except Exception as e:
+            print(f"[GUILD] leave_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
 
 class GuildInviteModal(discord.ui.Modal, title="Пригласить в гильдию"):
@@ -3598,50 +3625,74 @@ class GuildLeaderView(discord.ui.View):
     @discord.ui.button(label="Пригласить", emoji="📩",
                         style=discord.ButtonStyle.success, custom_id="guild:invite")
     async def invite_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        g = self.db.get_guild_by_member(interaction.user.id)
-        if not g:
-            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
-            return
-        member_data = self.db.get_guild_member(g["id"], interaction.user.id)
-        if not member_data or member_data["role"] not in ("leader", "officer"):
-            await interaction.response.send_message("Только лидер или офицер может приглашать.", ephemeral=True)
-            return
-        await interaction.response.send_modal(GuildInviteModal(self.db, g["id"]))
+        try:
+            g = self.db.get_guild_by_member(interaction.user.id)
+            if not g:
+                await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
+                return
+            member_data = self.db.get_guild_member(g["id"], interaction.user.id)
+            if not member_data or member_data["role"] not in ("leader", "officer"):
+                await interaction.response.send_message("Только лидер или офицер может приглашать.", ephemeral=True)
+                return
+            await interaction.response.send_modal(GuildInviteModal(self.db, g["id"]))
+        except Exception as e:
+            print(f"[GUILD] invite_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Исключить", emoji="🚫",
                         style=discord.ButtonStyle.danger, custom_id="guild:kick")
     async def kick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        g = self.db.get_guild_by_member(interaction.user.id)
-        if not g:
-            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
-            return
-        member_data = self.db.get_guild_member(g["id"], interaction.user.id)
-        if not member_data or member_data["role"] not in ("leader", "officer"):
-            await interaction.response.send_message("Только лидер или офицер может кикать.", ephemeral=True)
-            return
-        await interaction.response.send_modal(GuildKickModal(self.db, g["id"], g["leader_id"]))
+        try:
+            g = self.db.get_guild_by_member(interaction.user.id)
+            if not g:
+                await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
+                return
+            member_data = self.db.get_guild_member(g["id"], interaction.user.id)
+            if not member_data or member_data["role"] not in ("leader", "officer"):
+                await interaction.response.send_message("Только лидер или офицер может кикать.", ephemeral=True)
+                return
+            await interaction.response.send_modal(GuildKickModal(self.db, g["id"], g["leader_id"]))
+        except Exception as e:
+            print(f"[GUILD] kick_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Распустить", emoji="💣",
                         style=discord.ButtonStyle.danger, custom_id="guild:disband")
     async def disband_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        g = self.db.get_guild_by_leader(interaction.user.id)
-        if not g:
-            await interaction.response.send_message("Вы не лидер гильдии.", ephemeral=True)
-            return
-        members = self.db.get_guild_members(g["id"])
-        self.db.disband_guild(g["id"])
         try:
-            role = interaction.guild.get_role(g["color"]) if g["color"] else None
-            if role:
-                for m in members:
-                    mem = interaction.guild.get_member(m["discord_id"])
-                    if mem:
-                        await mem.remove_roles(role, reason="Гильдия распущена")
-                await role.delete(reason="Гильдия распущена")
-        except Exception:
-            pass
-        await interaction.response.send_message(
-            f"❌ Гильдия **[{g['tag']}] {g['name']}** распущена.", ephemeral=True)
+            g = self.db.get_guild_by_leader(interaction.user.id)
+            if not g:
+                await interaction.response.send_message("Вы не лидер гильдии.", ephemeral=True)
+                return
+            members = self.db.get_guild_members(g["id"])
+            self.db.disband_guild(g["id"])
+            try:
+                role = interaction.guild.get_role(g["color"]) if g["color"] else None
+                if role:
+                    for m in members:
+                        mem = interaction.guild.get_member(m["discord_id"])
+                        if mem:
+                            await mem.remove_roles(role, reason="Гильдия распущена")
+                    await role.delete(reason="Гильдия распущена")
+            except Exception:
+                pass
+            await interaction.response.send_message(
+                f"❌ Гильдия **[{g['tag']}] {g['name']}** распущена.", ephemeral=True)
+        except Exception as e:
+            print(f"[GUILD] disband_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except Exception:
+                pass
 
 
 # ---------------- cog ----------------
