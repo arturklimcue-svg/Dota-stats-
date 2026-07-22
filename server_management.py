@@ -1728,6 +1728,65 @@ class ToxicityAlertListener(commands.Cog):
                 break
 
 
+# ---------------- 🤖 панель управления ботом ----------------
+
+class PanelView(discord.ui.View):
+    """Интерактивная панель управления ботом для админов."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Настройка сервера", emoji="⚙️",
+                        style=discord.ButtonStyle.danger, custom_id="admin:server_setup_panel")
+    async def setup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "⚙️ Выполните `!dota_server_setup` в этом канале.", ephemeral=True)
+
+    @discord.ui.button(label="Патч-панель", emoji="📊",
+                        style=discord.ButtonStyle.secondary, custom_id="admin:patch_panel")
+    async def patch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "📊 Выполните `!dota_patch_panel` в канале 📈-аналитика.", ephemeral=True)
+
+    @discord.ui.button(label="Список игроков", emoji="📋",
+                        style=discord.ButtonStyle.secondary, custom_id="admin:players_list")
+    async def players_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "📋 Выполните `!dota_players` для списка привязанных игроков.", ephemeral=True)
+
+    @discord.ui.button(label="Очистка", emoji="🧹",
+                        style=discord.ButtonStyle.danger, custom_id="admin:cleanup_panel")
+    async def cleanup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "🧹 Выполните `!dota_cleanup` для удаления лишних каналов.\n"
+            "⚠️ Безвозвратно удалит каналы вне конфигурации бота.", ephemeral=True)
+
+    @discord.ui.button(label="Очистить этот канал", emoji="🗑️",
+                        style=discord.ButtonStyle.danger, custom_id="admin:purge_channel")
+    async def purge_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        try:
+            deleted = await interaction.channel.purge(limit=100)
+            await interaction.response.send_message(
+                f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Нет прав на удаление сообщений.", ephemeral=True)
+
+
 # ---------------- cog ----------------
 
 class ServerManagement(commands.Cog):
@@ -2341,65 +2400,6 @@ class ServerManagement(commands.Cog):
         except discord.Forbidden:
             pass
         await ctx.send("✅ Панель аналитики патчей закреплена!", delete_after=5)
-
-    # ---------- 🤖 панель управления ботом ----------
-
-class PanelView(discord.ui.View):
-    """Интерактивная панель управления ботом для админов."""
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Настройка сервера", emoji="⚙️",
-                        style=discord.ButtonStyle.danger, custom_id="admin:server_setup_panel")
-    async def setup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "⚙️ Выполните `!dota_server_setup` в этом канале.", ephemeral=True)
-
-    @discord.ui.button(label="Патч-панель", emoji="📊",
-                        style=discord.ButtonStyle.secondary, custom_id="admin:patch_panel")
-    async def patch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "📊 Выполните `!dota_patch_panel` в канале 📈-аналитика.", ephemeral=True)
-
-    @discord.ui.button(label="Список игроков", emoji="📋",
-                        style=discord.ButtonStyle.secondary, custom_id="admin:players_list")
-    async def players_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "📋 Выполните `!dota_players` для списка привязанных игроков.", ephemeral=True)
-
-    @discord.ui.button(label="Очистка", emoji="🧹",
-                        style=discord.ButtonStyle.danger, custom_id="admin:cleanup_panel")
-    async def cleanup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "🧹 Выполните `!dota_cleanup` для удаления лишних каналов.\n"
-            "⚠️ Безвозвратно удалит каналы вне конфигурации бота.", ephemeral=True)
-
-    @discord.ui.button(label="Очистить этот канал", emoji="🗑️",
-                        style=discord.ButtonStyle.danger, custom_id="admin:purge_channel")
-    async def purge_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
-            return
-        try:
-            deleted = await interaction.channel.purge(limit=100)
-            await interaction.response.send_message(
-                f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ Нет прав на удаление сообщений.", ephemeral=True)
-
 
     @commands.command(name="panel")
     @commands.has_permissions(administrator=True)
