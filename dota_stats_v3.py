@@ -4991,5 +4991,60 @@ class DotaStats(commands.Cog):
 
     # ---------- гильдии (кланы) ----------
 
+    @commands.command(name="guild_leave")
+    async def guild_leave_cmd(self, ctx: commands.Context):
+        """Покинуть гильдию (любой админ может для себя)"""
+        g = self.db.get_guild_by_member(ctx.author.id)
+        if not g:
+            await ctx.send("Вы не состоите в гильдии.")
+            return
+        is_leader = g["leader_id"] == ctx.author.id
+        self.db.leave_guild(ctx.author.id)
+        try:
+            role = ctx.guild.get_role(g["color"]) if g["color"] else None
+            if role:
+                await ctx.author.remove_roles(role, reason="Покинул гильдию")
+        except Exception:
+            pass
+        count = self.db.get_guild_member_count(g["id"])
+        extra = " (гильдия распущена — лидер вышел)" if is_leader else ""
+        await ctx.send(f"✅ Вы покинули **[{g['tag']}] {g['name']}**. ({count} участников){extra}")
+
+    @commands.command(name="guild_fix")
+    @commands.has_permissions(administrator=True)
+    async def guild_fix_cmd(self, ctx: commands.Context):
+        """Создать каналы для гильдий, у которых их нет"""
+        guilds = self.db.all_guilds(ctx.guild.id)
+        if not guilds:
+            await ctx.send("Гильдий нет.")
+            return
+        arena_cat = discord.utils.get(ctx.guild.categories, name="⚔️ Арена")
+        created = 0
+        for g in guilds:
+            tag = g['tag']
+            channel_name = f"[{tag}]-чат"
+            existing = discord.utils.get(ctx.guild.text_channels, name=channel_name)
+            if existing:
+                continue
+            role = ctx.guild.get_role(g["color"]) if g["color"] else None
+            try:
+                overwrites = {
+                    ctx.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    ctx.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                }
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True)
+                ch = await ctx.guild.create_text_channel(
+                    name=channel_name,
+                    category=arena_cat,
+                    overwrites=overwrites,
+                    topic=f"Гильдия {g['name']}",
+                    reason=f"guild_fix для [{g['tag']}]")
+                created += 1
+            except Exception as e:
+                print(f"[GUILD_FIX] {g['tag']}: {e}")
+        await ctx.send(f"✅ Создано каналов: {created} из {len(guilds)} гильдий.")
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(DotaStats(bot))
