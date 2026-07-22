@@ -185,7 +185,7 @@ PLAYER_BACKUP_CHANNEL_ID = _resolve_backup_channel_id()
 # ВАЖНО: если переименуете эти категории/каналы в server_management.py
 # (RANK_GROUPS / STATS_CATEGORY / JOIN_TO_CREATE_CHANNEL), обновите и здесь.
 ALWAYS_PROTECTED_VOICE_CATEGORY_NAMES = set()
-ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES = set()
+ALWAYS_PROTECTED_VOICE_CHANNEL_NAMES = {"🎮 Гостевая"}
 
 # Маркер в начале сообщения-бэкапа — по нему бот отличает "свои" служебные
 # сообщения от любых других (например, если админ что-то написал в тот же
