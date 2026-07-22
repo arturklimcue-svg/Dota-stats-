@@ -1886,6 +1886,75 @@ class PatchListViewWithNumbers(discord.ui.View):
 
 # ---------------- 🤖 панель управления ботом ----------------
 
+class BindPlayerModal(discord.ui.Modal, title="Привязка игрока Steam"):
+    discord_id_input = discord.ui.TextInput(
+        label="Discord ID пользователя", placeholder="напр. 1527794695336366271",
+        max_length=20)
+    steam_id_input = discord.ui.TextInput(
+        label="Steam ID (32-bit или 64-bit)", placeholder="напр. 76561198036498598 или 355227172",
+        max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            discord_id = int(str(self.discord_id_input.value).strip())
+            steam_raw = str(self.steam_id_input.value).strip()
+            from dota_stats_v3 import db, to_account_id, to_steam64
+            account_id = to_account_id(steam_raw)
+            steam64 = to_steam64(steam_raw)
+            if not account_id:
+                await interaction.response.send_message(
+                    "❌ Неверный Steam ID.", ephemeral=True)
+                return
+            db.register(discord_id, account_id, steam64)
+            await interaction.response.send_message(
+                f"✅ Привязан: <@{discord_id}> → Steam `{steam_raw}` "
+                f"(account_id={account_id})", ephemeral=True)
+        except Exception as e:
+            print(f"[PANEL] bind_player error: {e}")
+            try:
+                await interaction.response.send_message(
+                    "❌ Ошибка привязки. Проверьте ID.", ephemeral=True)
+            except Exception:
+                pass
+
+
+class EconomyModal(discord.ui.Modal, title="Управление экономикой"):
+    target_id = discord.ui.TextInput(
+        label="Discord ID пользователя", placeholder="напр. 1527794695336366271",
+        max_length=20)
+    amount = discord.ui.TextInput(
+        label="Сумма (+дать, -забрать)", placeholder="напр. 100 или -50",
+        max_length=10)
+    reason = discord.ui.TextInput(
+        label="Причина (необязательно)", placeholder="напр. Награда за актив",
+        max_length=100, required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            discord_id = int(str(self.target_id_input).strip() if False else str(self.target_id.value).strip())
+            amount_val = int(str(self.amount.value).strip())
+            reason = str(self.reason.value or "Админ-операция").strip()
+            from dota_stats_v3 import db
+            old_bal = db.get_balance(discord_id)
+            if amount_val > 0:
+                db.add_shards(discord_id, amount_val, reason)
+            elif amount_val < 0:
+                db.spend_shards(discord_id, abs(amount_val), reason)
+            new_bal = db.get_balance(discord_id)
+            emoji = "💎" if amount_val > 0 else "💸"
+            await interaction.response.send_message(
+                f"{emoji} <@{discord_id}>: {old_bal} → {new_bal} "
+                f"({'+' if amount_val > 0 else ''}{amount_val}) [{reason}]",
+                ephemeral=True)
+        except Exception as e:
+            print(f"[PANEL] economy error: {e}")
+            try:
+                await interaction.response.send_message(
+                    "❌ Ошибка. Проверьте ID и сумму.", ephemeral=True)
+            except Exception:
+                pass
+
+
 class PanelView(discord.ui.View):
     """Интерактивная панель управления ботом для админов.
     Кнопки напрямую вызывают методы серверного кога."""
@@ -2004,6 +2073,35 @@ class PanelView(discord.ui.View):
             f"🗑 Удалено сообщений: {cleaned_msgs}, пинов: {cleaned_pins}"
             + (f"\n⚠️ Нет прав в: {', '.join(skipped_channels)}" if skipped_channels else ""),
             ephemeral=True)
+
+    @discord.ui.button(label="Привязать игрока", emoji="🔗",
+                        style=discord.ButtonStyle.primary, custom_id="admin:bind_player")
+    async def bind_player_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_admin(interaction):
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_modal(BindPlayerModal())
+
+    @discord.ui.button(label="Экономика", emoji="💰",
+                        style=discord.ButtonStyle.primary, custom_id="admin:economy")
+    async def economy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_admin(interaction):
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EconomyModal())
+
+    @discord.ui.button(label="Каналы панелей", emoji="📡",
+                        style=discord.ButtonStyle.secondary, custom_id="admin:channel_config")
+    async def channel_config_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_admin(interaction):
+            await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
+            return
+        channels = [f"#{ch.name}" for ch in interaction.guild.text_channels[:25]]
+        embed = discord.Embed(
+            title="📡 Текстовые каналы сервера",
+            description="\n".join(channels) or "Нет каналов",
+            color=0x2ECC71)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class PanelViewPurge(discord.ui.View):

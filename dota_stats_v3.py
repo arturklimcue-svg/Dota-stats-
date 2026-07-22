@@ -3250,60 +3250,67 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
         self.db = db
 
     async def on_submit(self, interaction: discord.Interaction):
-        tag = str(self.guild_tag.value).strip().upper()
-        name = str(self.guild_name.value).strip()
-        if not tag.isalpha() or len(tag) < 3 or len(tag) > GUILD_TAG_MAX:
-            await interaction.response.send_message(
-                f"Тег должен быть 3-{GUILD_TAG_MAX} заглавных букв (только латиница).", ephemeral=True)
-            return
-        if not name:
-            await interaction.response.send_message("Название не может быть пустым.", ephemeral=True)
-            return
-        if self.db.get_guild_by_tag(tag):
-            await interaction.response.send_message(
-                f"Тег [{tag}] уже занят. Выберите другой.", ephemeral=True)
-            return
-        if self.db.get_guild_by_member(interaction.user.id):
-            await interaction.response.send_message(
-                "Вы уже состоите в гильдии. Сначала покиньте её.", ephemeral=True)
-            return
-        if GUILD_CREATE_COST > 0:
-            bal = self.db.get_balance(interaction.user.id)
-            if bal < GUILD_CREATE_COST:
-                await interaction.response.send_message(
-                    f"Нужно {GUILD_CREATE_COST} кристаллов для создания гильдии. "
-                    f"У вас {bal}.", ephemeral=True)
-                return
-        guild_id = self.db.create_guild(
-            interaction.guild.id, name, tag, interaction.user.id)
-        if not guild_id:
-            await interaction.response.send_message("Ошибка создания гильдии.", ephemeral=True)
-            return
-        if GUILD_CREATE_COST > 0:
-            self.db.spend_shards(interaction.user.id, GUILD_CREATE_COST, "guild_create")
-        # Создаём роль Discord с тегом
         try:
-            role = await interaction.guild.create_role(
-                name=f"[{tag}]",
-                color=discord.Color(0x8B4513),
-                reason=f"Гильдия {name}")
-            await interaction.user.add_roles(role, reason=f"Создатель гильдии [{tag}]")
-            # Сохраняем role_id в guilds (используем color поле для role_id, если нужно)
-            self.db.conn.execute(
-                "UPDATE guilds SET color=? WHERE id=?", (role.id, guild_id))
-            self.db.conn.commit()
-        except discord.Forbidden:
-            pass
-        # Логируем транзакцию shards если бесплатно — не списываем
-        embed = discord.Embed(
-            title=f"⚔️ Гильдия создана: [{tag}] {name}",
-            description=(
-                f"Создатель: {interaction.user.mention}\n\n"
-                "Используйте `/guild info` для просмотра информации.\n"
-                "Приглашайте игроков кнопкой ниже!"
-            ),
-            color=0x8B4513)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            tag = str(self.guild_tag.value).strip().upper()
+            name = str(self.guild_name.value).strip()
+            if not tag.isalpha() or len(tag) < 3 or len(tag) > GUILD_TAG_MAX:
+                await interaction.response.send_message(
+                    f"Тег должен быть 3-{GUILD_TAG_MAX} заглавных букв (только латиница).", ephemeral=True)
+                return
+            if not name:
+                await interaction.response.send_message("Название не может быть пустым.", ephemeral=True)
+                return
+            if self.db.get_guild_by_tag(tag):
+                await interaction.response.send_message(
+                    f"Тег [{tag}] уже занят. Выберите другой.", ephemeral=True)
+                return
+            if self.db.get_guild_by_member(interaction.user.id):
+                await interaction.response.send_message(
+                    "Вы уже состоите в гильдии. Сначала покиньте её.", ephemeral=True)
+                return
+            if GUILD_CREATE_COST > 0:
+                bal = self.db.get_balance(interaction.user.id)
+                if bal < GUILD_CREATE_COST:
+                    await interaction.response.send_message(
+                        f"Нужно {GUILD_CREATE_COST} кристаллов для создания гильдии. "
+                        f"У вас {bal}.", ephemeral=True)
+                    return
+            guild_id = self.db.create_guild(
+                interaction.guild.id, name, tag, interaction.user.id)
+            if not guild_id:
+                await interaction.response.send_message("Ошибка создания гильдии.", ephemeral=True)
+                return
+            if GUILD_CREATE_COST > 0:
+                self.db.spend_shards(interaction.user.id, GUILD_CREATE_COST, "guild_create")
+            # Создаём роль Discord с тегом
+            try:
+                role = await interaction.guild.create_role(
+                    name=f"[{tag}]",
+                    color=discord.Color(0x8B4513),
+                    reason=f"Гильдия {name}")
+                await interaction.user.add_roles(role, reason=f"Создатель гильдии [{tag}]")
+                self.db.conn.execute(
+                    "UPDATE guilds SET color=? WHERE id=?", (role.id, guild_id))
+                self.db.conn.commit()
+            except Exception as e:
+                print(f"[GUILD] role error: {e}")
+            embed = discord.Embed(
+                title=f"⚔️ Гильдия создана: [{tag}] {name}",
+                description=(
+                    f"Создатель: {interaction.user.mention}\n\n"
+                    "Используйте `/guild info` для просмотра информации.\n"
+                    "Приглашайте игроков кнопкой ниже!"
+                ),
+                color=0x8B4513)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[GUILD] create_modal error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ Ошибка создания гильдии.", ephemeral=True)
+            except Exception:
+                pass
 
 
 class GuildInviteConfirmView(discord.ui.View):
@@ -3361,11 +3368,20 @@ class GuildHubView(discord.ui.View):
     @discord.ui.button(label="Создать гильдию", emoji="🆕",
                         style=discord.ButtonStyle.success, custom_id="guild:create")
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.db.get_guild_by_member(interaction.user.id):
-            await interaction.response.send_message(
-                "Вы уже состоите в гильдии.", ephemeral=True)
-            return
-        await interaction.response.send_modal(GuildCreateModal(self.db))
+        try:
+            if self.db.get_guild_by_member(interaction.user.id):
+                await interaction.response.send_message(
+                    "Вы уже состоите в гильдии.", ephemeral=True)
+                return
+            await interaction.response.send_modal(GuildCreateModal(self.db))
+        except Exception as e:
+            print(f"[GUILD] create_btn error: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ Ошибка. Попробуйте позже.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Моя гильдия", emoji="🏰",
                         style=discord.ButtonStyle.primary, custom_id="guild:info")
