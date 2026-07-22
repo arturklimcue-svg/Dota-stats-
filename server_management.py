@@ -1977,8 +1977,7 @@ class PanelView(discord.ui.View):
             try:
                 pins = await ch.pins()
             except discord.Forbidden:
-                skipped_channels.append(ch.name)
-                continue
+                pins = []
             for p in pins:
                 if p.author.id == me.id:
                     try:
@@ -3521,7 +3520,7 @@ class ServerManagement(commands.Cog):
             try:
                 pins = await ch.pins()
             except discord.Forbidden:
-                continue
+                pins = []
             for p in pins:
                 if p.author.id == me.id:
                     try:
