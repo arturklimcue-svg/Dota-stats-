@@ -1845,6 +1845,7 @@ class ServerManagement(commands.Cog):
         self.bot = bot
         self.db = db  # общий экземпляр с dota_stats_v3
         self._pending_deletes: dict[int, asyncio.Task] = {}  # channel_id -> scheduled delete task
+        self._hub_ids: set[int] = set()  # ID голосовых хабов (никогда не удалять)
         self.resync_ranks.start()
         self.auto_purge.start()
         self.update_stats_channels.start()
@@ -2134,8 +2135,9 @@ class ServerManagement(commands.Cog):
         # удаление опустевших временных каналов (с задержкой 1 минута)
         if before.channel:
             # не удалять голосовые хабы (постоянные каналы)
-            if before.channel.name == GUEST_VOICE_HUB:
+            if before.channel.name == GUEST_VOICE_HUB or before.channel.id in self._hub_ids:
                 return
+            # не удалять если канал НЕ зарегистрирован как managed (хабы не регистрируются)
             is_bot_managed = self.db.is_managed_voice_channel(before.channel.id)
             is_protected = self.db.is_voice_protected(
                 before.channel.id, before.channel.category_id if before.channel.category else None,
@@ -2770,6 +2772,7 @@ class ServerManagement(commands.Cog):
                 reason="Гостевой хаб")
         await guest_hub.set_permissions(everyone, connect=True, speak=True)
         await guest_hub.set_permissions(unverified, connect=True, speak=True)
+        self._hub_ids.add(guest_hub.id)
 
         # ---- ⚔️ Арена (общение, только верифицированные) ----
         community_category = discord.utils.get(guild.categories, name=COMMUNITY_CATEGORY)
