@@ -2175,7 +2175,22 @@ class ServerManagement(commands.Cog):
                 color=0x8B4513)
             for phase, items in recs.items():
                 embed.add_field(name=phase, value="\n".join(items), inline=True)
-            await channel.send(embed=embed)
+            # обновить существующее сообщение или создать новое
+            existing_msg = None
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author == channel.guild.me and msg.embeds and msg.embeds[0].title and msg.embeds[0].title.startswith("🐲 Герой дня"):
+                        existing_msg = msg
+                        break
+            except discord.Forbidden:
+                pass
+            if existing_msg:
+                try:
+                    await existing_msg.edit(embed=embed)
+                except discord.HTTPException:
+                    await channel.send(embed=embed)
+            else:
+                await channel.send(embed=embed)
 
     @hero_of_the_day.before_loop
     async def before_hero_of_day(self):
@@ -2210,7 +2225,22 @@ class ServerManagement(commands.Cog):
                 color=0x8B4513)
             notify_role = discord.utils.get(guild.roles, name=NOTIFY_ROLE_NAME)
             content = notify_role.mention if notify_role else None
-            await channel.send(content=content, embed=embed)
+            # обновить существующее сообщение или создать новое
+            existing_msg = None
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author == channel.guild.me and msg.embeds and msg.embeds[0].title and "Мета недели" in msg.embeds[0].title:
+                        existing_msg = msg
+                        break
+            except discord.Forbidden:
+                pass
+            if existing_msg:
+                try:
+                    await existing_msg.edit(content=content, embed=embed)
+                except discord.HTTPException:
+                    await channel.send(content=content, embed=embed)
+            else:
+                await channel.send(content=content, embed=embed)
 
     @weekly_meta_digest.before_loop
     async def before_weekly_meta(self):
@@ -2268,10 +2298,25 @@ class ServerManagement(commands.Cog):
                 title="📊 Аналитика патча: кто выиграл, кто проиграл",
                 description="\n".join(lines),
                 color=0x8B4513)
-            embed.set_footer(text="Ежедневный дайджест • Публичные ранговые матчи")
+            embed.set_footer(text="Еженедельный дайджест • Публичные ранговые матчи")
             notify_role = discord.utils.get(guild.roles, name=NOTIFY_ROLE_NAME)
             content = notify_role.mention if notify_role else None
-            await channel.send(content=content, embed=embed)
+            # обновить существующее сообщение или создать новое
+            existing_msg = None
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author == channel.guild.me and msg.embeds and msg.embeds[0].title and "Аналитика патча" in msg.embeds[0].title:
+                        existing_msg = msg
+                        break
+            except discord.Forbidden:
+                pass
+            if existing_msg:
+                try:
+                    await existing_msg.edit(content=content, embed=embed)
+                except discord.HTTPException:
+                    await channel.send(content=content, embed=embed)
+            else:
+                await channel.send(content=content, embed=embed)
 
     @daily_patch_digest.before_loop
     async def before_daily_patch(self):
