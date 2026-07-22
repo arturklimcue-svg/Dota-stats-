@@ -80,7 +80,7 @@ LFG_CHANNEL = "🔍-лфг"
 GAME_TEXT_CHANNELS = [LFG_CHANNEL, "🐲-бестиарий"]
 
 GUEST_CATEGORY = "🎮 Гости"
-GUEST_CHANNEL = "🎮-гости"
+GUEST_VOICE_HUB = "🎮 Гостевая"
 
 SHOP_CATEGORY = "🛒 Магазин"
 SHOP_CHANNEL = "🛒-магазин"
@@ -213,7 +213,7 @@ CHANNEL_TOPICS = {
     "🛒-магазин": "Магазин shards: ежедневный бонус, товары и баланс",
     "🎮-создание-комнат": "Создание голосовых комнат + быстрый матч",
     PATCH_ANALYTICS_CHANNEL: "Аналитика патчей: победители, проигравшие, мета",
-    GUEST_CHANNEL: "Гостевая зона — создайте временную голосовую комнату для общения",
+    GUEST_VOICE_HUB: "Гостевая зона — зайдите сюда, чтобы создать временную голосовую комнату",
     MOD_LOG_CHANNEL: "Лог действий модераторов: предупреждения, таймауты, жалобы",
 }
 
@@ -776,44 +776,6 @@ class VoiceRoomCreateView(discord.ui.View):
 
 
 # ---------------- 🎮 гостевые комнаты (для неверифицированных) ----------------
-
-class GuestVoiceView(discord.ui.View):
-    """Создание временной голосовой комнаты для гостей (неверифицированных)."""
-    def __init__(self, db: Storage):
-        super().__init__(timeout=None)
-        self.db = db
-
-    @discord.ui.button(label="Создать комнату", emoji="🎮",
-                        style=discord.ButtonStyle.primary,
-                        custom_id="voice:create_guest")
-    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        member = interaction.user
-        guild = interaction.guild
-        ch_name = f"🎮 {member.display_name}"
-
-        category = discord.utils.get(guild.categories, name=GUEST_CATEGORY)
-        if not category:
-            category = interaction.channel.category
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, stream=True),
-            member: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, manage_channels=True, stream=True),
-            interaction.guild.me: discord.PermissionOverwrite(
-                view_channel=True, connect=True, manage_channels=True, stream=True),
-        }
-
-        temp = await guild.create_voice_channel(
-            name=ch_name, category=category, user_limit=5,
-            overwrites=overwrites,
-            reason=f"Гостевая комната от {member}")
-        self.db.register_voice_channel(temp.id, guild.id)
-        await member.move_to(temp)
-        await interaction.followup.send(
-            f"✅ Гостевая комната: {temp.mention}\n"
-            "Когда все выйдут — комната удалится автоматически.",
-            ephemeral=True)
 
 
 # ---------------- 🚨 жалобы на игроков в войсе ----------------
@@ -2035,6 +1997,30 @@ class ServerManagement(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member,
                                      before: discord.VoiceState, after: discord.VoiceState):
+        # --- гостевой хаб: при входе создаётся временная комната ---
+        if after.channel and after.channel.name == GUEST_VOICE_HUB:
+            guild = after.channel.guild
+            category = after.channel.category
+            ch_name = f"🎮 {member.display_name}"
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    view_channel=True, connect=True, speak=True, stream=True),
+                member: discord.PermissionOverwrite(
+                    view_channel=True, connect=True, speak=True,
+                    manage_channels=True, stream=True),
+                guild.me: discord.PermissionOverwrite(
+                    view_channel=True, connect=True, manage_channels=True, stream=True),
+            }
+            temp = await guild.create_voice_channel(
+                name=ch_name, category=category, user_limit=5,
+                overwrites=overwrites,
+                reason=f"Гостевая комната от {member}")
+            self.db.register_voice_channel(temp.id, guild.id)
+            try:
+                await member.move_to(temp)
+            except discord.HTTPException:
+                pass
+
         # удаление опустевших временных каналов (с задержкой 1 минута)
         if before.channel:
             is_bot_managed = self.db.is_managed_voice_channel(before.channel.id)
@@ -2665,34 +2651,22 @@ class ServerManagement(commands.Cog):
             elif ch.category != info_category:
                 await ch.edit(category=info_category)
 
-        # ---- 🎮 Гости (видно неверифицированным, только голосовые) ----
+        # ---- 🎮 Гости (видно неверифицированным, голосовой хаб) ----
         guest_category = discord.utils.get(guild.categories, name=GUEST_CATEGORY)
         if not guest_category:
             guest_category = await guild.create_category(GUEST_CATEGORY)
         await guest_category.set_permissions(everyone, view_channel=True)
         await guest_category.set_permissions(unverified, view_channel=True, connect=True)
         await guest_category.set_permissions(verified, view_channel=False)
-        guest_ch = discord.utils.get(guild.text_channels, name=GUEST_CHANNEL)
-        if not guest_ch:
-            guest_ch = await guild.create_text_channel(GUEST_CHANNEL, category=guest_category)
-        await guest_ch.set_permissions(everyone, send_messages=False)
-        await guest_ch.set_permissions(unverified, send_messages=False)
-        guest_pins = await guest_ch.pins()
-        if not guest_pins:
-            guest_embed = discord.Embed(
-                title="🎮 Гостевая зона",
-                description=(
-                    "Добро пожаловать! Здесь вы можете создать временную голосовую комнату "
-                    "для общения с друзьями.\n\n"
-                    "Для полного доступа к серверу пройдите верификацию в "
-                    "канале #🔐-ВЕРИФИКАЦИЯ."
-                ),
-                color=0x2B2D31)
-            guest_msg = await guest_ch.send(embed=guest_embed, view=GuestVoiceView(self.db))
-            try:
-                await guest_msg.pin()
-            except discord.Forbidden:
-                pass
+
+        guest_hub = discord.utils.get(guild.voice_channels, name=GUEST_VOICE_HUB,
+                                       category=guest_category)
+        if not guest_hub:
+            guest_hub = await guild.create_voice_channel(
+                GUEST_VOICE_HUB, category=guest_category, position=0,
+                reason="Гостевой хаб")
+        await guest_hub.set_permissions(everyone, connect=True, speak=True)
+        await guest_hub.set_permissions(unverified, connect=True, speak=True)
 
         # ---- ⚔️ Арена (общение, только верифицированные) ----
         community_category = discord.utils.get(guild.categories, name=COMMUNITY_CATEGORY)
@@ -3186,6 +3160,15 @@ class ServerManagement(commands.Cog):
                     deleted_count += 1
                 except discord.HTTPException:
                     pass
+
+        # удаление старого текстового канала гостей (заменён голосовым хабом)
+        old_guest_ch = discord.utils.get(guild.text_channels, name="🎮-гости")
+        if old_guest_ch:
+            try:
+                await old_guest_ch.delete(reason="Заменён голосовым хабом")
+                deleted_count += 1
+            except discord.HTTPException:
+                pass
 
         # удаление голосовых каналов в категории Статистика (там должен быть только текстовый)
         stats_cat = discord.utils.get(guild.categories, name=STATS_CATEGORY)
