@@ -341,7 +341,19 @@ async def post_pinned_info(channel: discord.TextChannel, title: str, description
 
 async def post_pinned_info_with_view(channel: discord.TextChannel,
                                       embed: discord.Embed, view: discord.ui.View):
-    """Отправляет и закрепляет embed с view."""
+    """Отправляет и закрепляет embed с view. Пропускает, если уже есть пин с таким же заголовком."""
+    try:
+        pins = await channel.pins()
+    except discord.Forbidden:
+        return
+    me = channel.guild.me
+    title = embed.title
+    existing = next(
+        (p for p in pins if p.author.id == me.id and p.embeds and p.embeds[0].title == title),
+        None,
+    )
+    if existing:
+        return  # уже есть актуальный пин — не дублируем
     msg = await channel.send(embed=embed, view=view)
     try:
         await msg.pin()
@@ -3460,11 +3472,25 @@ class ServerManagement(commands.Cog):
         # ---- удаление всех старых сообщений бота в категориях бота ----
         me = guild.me
         cleaned = 0
+        cleaned_pins = 0
         for ch in list(guild.text_channels):
             if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
                 continue
+            # сначала открепить все пины бота (иначе удаление может не сработать)
             try:
-                async for msg in ch.history(limit=50).flatten():
+                pins = await ch.pins()
+            except discord.Forbidden:
+                pins = []
+            for p in pins:
+                if p.author.id == me.id:
+                    try:
+                        await p.unpin()
+                        cleaned_pins += 1
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            # удалить все сообщения бота
+            try:
+                async for msg in ch.history(limit=200).flatten():
                     if msg.author.id == me.id:
                         try:
                             await msg.delete()
@@ -3474,13 +3500,13 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
         if DEBUG_LOG and cleaned:
-            print(f"[SETUP] Удалено {cleaned} старых сообщений бота")
+            print(f"[SETUP] Удалено {cleaned} сообщений, {cleaned_pins} пинов бота")
 
         await ctx.send(
             f"Готово! Настроены: Начало, Арена, Стратегия, Игровое, Магазин, "
             f"Гости, Голосовые комнаты, Статистика, Модерация, Гильдии, верификация.\n"
             f"Удалено лишних каналов: {deleted_count}.\n"
-            f"Удалено старых сообщений бота: {cleaned}.")
+            f"Удалено старых сообщений: {cleaned}, пинов: {cleaned_pins}.")
 
 
 async def setup(bot: commands.Bot):
