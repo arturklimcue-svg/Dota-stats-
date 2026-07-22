@@ -1765,7 +1765,7 @@ class ToxicityAlertListener(commands.Cog):
 class PatchViewPage(discord.ui.View):
     """Страница конкретного патча."""
     def __init__(self, patch_data: dict, page: int, total: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.page = page
         self.total = total
         if page > 0:
@@ -1787,7 +1787,7 @@ class PatchViewPage(discord.ui.View):
 class PatchListView(discord.ui.View):
     """Список последних 5 патчей Dota 2."""
     def __init__(self):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="📊 Открыть список патчей", style=discord.ButtonStyle.secondary,
                         custom_id="patch:list")
@@ -2046,6 +2046,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(PanelView(self.bot))
         self.bot.add_view(PatchListView())
+        self.bot.add_view(PatchViewPage({}, 0, 1))
         self.bot.add_view(VoiceReportView())
         self.bot.add_view(QuickMatchView(self.db))
         self.bot.add_view(QuickMatchCancelView(0))
