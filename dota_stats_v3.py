@@ -3409,7 +3409,11 @@ class GuildHubView(discord.ui.View):
             name="👥 Участники",
             value="\n".join(lines[:20]) or "Нет данных",
             inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        view = None
+        my_role = self.db.get_guild_member(g["id"], interaction.user.id)
+        if my_role and my_role["role"] in ("leader", "officer"):
+            view = GuildLeaderView(self.db, g["id"], g["leader_id"])
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="Список гильдий", emoji="📋",
                         style=discord.ButtonStyle.secondary, custom_id="guild:list")
@@ -3458,6 +3462,149 @@ class GuildHubView(discord.ui.View):
             ephemeral=True)
 
 
+class GuildInviteModal(discord.ui.Modal, title="Пригласить в гильдию"):
+    target_id = discord.ui.TextInput(
+        label="ID пользователя Discord", placeholder="напр. 1527794695336366271",
+        max_length=20)
+
+    def __init__(self, db: Storage, guild_id: int):
+        super().__init__()
+        self.db = db
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(str(self.target_id.value).strip())
+        except ValueError:
+            await interaction.response.send_message("Неверный ID.", ephemeral=True)
+            return
+        g = None
+        for row in self.db.conn.execute(
+            "SELECT * FROM guilds WHERE id=?", (self.guild_id,)).fetchall():
+            cols = [d[0] for d in self.db.conn.execute("SELECT * FROM guilds LIMIT 0").description]
+            g = dict(zip(cols, row))
+        if not g:
+            await interaction.response.send_message("Гильдия не найдена.", ephemeral=True)
+            return
+        target = interaction.guild.get_member(target_id)
+        if not target:
+            await interaction.response.send_message("Пользователь не найден на сервере.", ephemeral=True)
+            return
+        if self.db.get_guild_by_member(target_id):
+            await interaction.response.send_message(f"{target.mention} уже в гильдии.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title=f"⚔️ Приглашение в [{g['tag']}] {g['name']}",
+            description=f"{interaction.user.mention} приглашает {target.mention} в гильдию!",
+            color=0x8B4513)
+        view = GuildInviteConfirmView(self.db, self.guild_id, interaction.user.id, target_id)
+        await interaction.response.send_message(
+            content=f"{target.mention}", embed=embed, view=view)
+
+
+class GuildKickModal(discord.ui.Modal, title="Исключить из гильдии"):
+    target_id = discord.ui.TextInput(
+        label="ID пользователя Discord", placeholder="напр. 1527794695336366271",
+        max_length=20)
+
+    def __init__(self, db: Storage, guild_id: int, leader_id: int):
+        super().__init__()
+        self.db = db
+        self.guild_id = guild_id
+        self.leader_id = leader_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(str(self.target_id.value).strip())
+        except ValueError:
+            await interaction.response.send_message("Неверный ID.", ephemeral=True)
+            return
+        g = None
+        for row in self.db.conn.execute(
+            "SELECT * FROM guilds WHERE id=?", (self.guild_id,)).fetchall():
+            cols = [d[0] for d in self.db.conn.execute("SELECT * FROM guilds LIMIT 0").description]
+            g = dict(zip(cols, row))
+        if not g:
+            await interaction.response.send_message("Гильдия не найдена.", ephemeral=True)
+            return
+        if target_id == self.leader_id:
+            await interaction.response.send_message("Нельзя кикнуть лидера.", ephemeral=True)
+            return
+        target_member = self.db.get_guild_member(self.guild_id, target_id)
+        if not target_member:
+            await interaction.response.send_message("Этот человек не в вашей гильдии.", ephemeral=True)
+            return
+        target = interaction.guild.get_member(target_id)
+        self.db.leave_guild(target_id)
+        try:
+            role = interaction.guild.get_role(g["color"]) if g["color"] else None
+            if role and target:
+                await target.remove_roles(role, reason="Кик из гильдии")
+        except Exception:
+            pass
+        name = target.display_name if target else str(target_id)
+        count = self.db.get_guild_member_count(self.guild_id)
+        await interaction.response.send_message(
+            f"❌ **{name}** исключён из [{g['tag']}]. ({count} участников)", ephemeral=True)
+
+
+class GuildLeaderView(discord.ui.View):
+    """Панель управления гильдией — для лидера/офицера."""
+    def __init__(self, db: Storage, guild_id: int, leader_id: int):
+        super().__init__(timeout=None)
+        self.db = db
+        self.guild_id = guild_id
+        self.leader_id = leader_id
+
+    @discord.ui.button(label="Пригласить", emoji="📩",
+                        style=discord.ButtonStyle.success, custom_id="guild:invite")
+    async def invite_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.db.get_guild_by_member(interaction.user.id)
+        if not g or g["id"] != self.guild_id:
+            await interaction.response.send_message("Это не ваша гильдия.", ephemeral=True)
+            return
+        member_data = self.db.get_guild_member(self.guild_id, interaction.user.id)
+        if not member_data or member_data["role"] not in ("leader", "officer"):
+            await interaction.response.send_message("Только лидер или офицер может приглашать.", ephemeral=True)
+            return
+        await interaction.response.send_modal(GuildInviteModal(self.db, self.guild_id))
+
+    @discord.ui.button(label="Исключить", emoji="🚫",
+                        style=discord.ButtonStyle.danger, custom_id="guild:kick")
+    async def kick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.db.get_guild_by_member(interaction.user.id)
+        if not g or g["id"] != self.guild_id:
+            await interaction.response.send_message("Это не ваша гильдия.", ephemeral=True)
+            return
+        member_data = self.db.get_guild_member(self.guild_id, interaction.user.id)
+        if not member_data or member_data["role"] not in ("leader", "officer"):
+            await interaction.response.send_message("Только лидер или офицер может кикать.", ephemeral=True)
+            return
+        await interaction.response.send_modal(GuildKickModal(self.db, self.guild_id, self.leader_id))
+
+    @discord.ui.button(label="Распустить", emoji="💣",
+                        style=discord.ButtonStyle.danger, custom_id="guild:disband")
+    async def disband_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.db.get_guild_by_leader(interaction.user.id)
+        if not g or g["id"] != self.guild_id:
+            await interaction.response.send_message("Только лидер может распустить гильдию.", ephemeral=True)
+            return
+        members = self.db.get_guild_members(self.guild_id)
+        self.db.disband_guild(self.guild_id)
+        try:
+            role = interaction.guild.get_role(g["color"]) if g["color"] else None
+            if role:
+                for m in members:
+                    mem = interaction.guild.get_member(m["discord_id"])
+                    if mem:
+                        await mem.remove_roles(role, reason="Гильдия распущена")
+                await role.delete(reason="Гильдия распущена")
+        except Exception:
+            pass
+        await interaction.response.send_message(
+            f"❌ Гильдия **[{g['tag']}] {g['name']}** распущена.", ephemeral=True)
+
+
 # ---------------- cog ----------------
 
 class DotaStats(commands.Cog):
@@ -3489,6 +3636,7 @@ class DotaStats(commands.Cog):
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(ShopView(self.db))
         self.bot.add_view(GuildHubView(self.db))
+        self.bot.add_view(GuildLeaderView(self.db, 0, 0))
         # переподключаем кнопки активных дуэлей после рестарта бота —
         # custom_id зашит в duel_id, поэтому старые сообщения снова оживают
         for duel in self.db.duels_by_status(["pending"]):
@@ -4894,151 +5042,6 @@ class DotaStats(commands.Cog):
         self._dirty_tournaments.add(tournament_id)
 
     # ---------- гильдии (кланы) ----------
-
-    @commands.command(name="guild")
-    async def guild_cmd(self, ctx: commands.Context, sub: str = "info", *, arg: str = ""):
-        """Гильдии: !guild create / !guild info / !guild list / !guild invite @user / !guild kick @user / !guild disband / !guild set_leader @user"""
-        sub = sub.lower().strip()
-        if sub == "create":
-            await ctx.send_modal(GuildCreateModal(self.db))
-        elif sub == "list":
-            guilds = self.db.all_guilds(ctx.guild.id)
-            if not guilds:
-                await ctx.send("Гильдий пока нет. Будьте первыми — `!guild create`")
-                return
-            lines = []
-            for g in guilds:
-                count = self.db.get_guild_member_count(g["id"])
-                leader = ctx.guild.get_member(g["leader_id"])
-                lname = leader.display_name if leader else f"<@{g['leader_id']}>"
-                lines.append(f"**[{g['tag']}]** {g['name']} — {count} чел. (лидер: {lname})")
-            await ctx.send("\n".join(lines))
-        elif sub == "info":
-            g = self.db.get_guild_by_member(ctx.author.id)
-            if not g:
-                await ctx.send("Вы не в гильдии. `!guild create` — создать.")
-                return
-            members = self.db.get_guild_members(g["id"])
-            lines = []
-            role_icons = {"leader": "👑", "officer": "⭐", "member": "•"}
-            for m in members:
-                member = ctx.guild.get_member(m["discord_id"])
-                name = member.display_name if member else f"<@{m['discord_id']}>"
-                icon = role_icons.get(m["role"], "•")
-                lines.append(f"{icon} {name}")
-            await ctx.send(
-                f"**🏰 [{g['tag']}] {g['name']}**\n"
-                f"Лидер: <@{g['leader_id']}>\n"
-                f"Участников: {len(members)}\n"
-                f"Участники:\n" + "\n".join(lines))
-        elif sub == "invite":
-            if not arg:
-                await ctx.send("Укажите пользователя: `!guild invite @user`")
-                return
-            g = self.db.get_guild_by_member(ctx.author.id)
-            if not g:
-                await ctx.send("Вы не в гильдии.")
-                return
-            member_role = self.db.get_guild_member(g["id"], ctx.author.id)
-            if not member_role or member_role["role"] not in ("leader", "officer"):
-                await ctx.send("Только лидер или офицер может приглашать.")
-                return
-            target = ctx.guild.get_member(ctx.author.id) if arg.startswith("<@") else None
-            if not target:
-                await ctx.send("Не удалось найти пользователя.")
-                return
-            if self.db.get_guild_by_member(target.id):
-                await ctx.send(f"{target.mention} уже в гильдии.")
-                return
-            embed = discord.Embed(
-                title=f"⚔️ Приглашение в [{g['tag']}] {g['name']}",
-                description=f"{ctx.author.mention} приглашает {target.mention} в гильдию!",
-                color=0x8B4513)
-            view = GuildInviteConfirmView(self.db, g["id"], ctx.author.id, target.id)
-            await ctx.send(content=f"{target.mention}", embed=embed, view=view)
-        elif sub == "kick":
-            if not arg:
-                await ctx.send("Укажите пользователя: `!guild kick @user`")
-                return
-            g = self.db.get_guild_by_member(ctx.author.id)
-            if not g:
-                await ctx.send("Вы не в гильдии.")
-                return
-            member_role = self.db.get_guild_member(g["id"], ctx.author.id)
-            if not member_role or member_role["role"] not in ("leader", "officer"):
-                await ctx.send("Только лидер или офицер может кикать.")
-                return
-            target = ctx.mentions[0] if ctx.mentions else None
-            if not target:
-                await ctx.send("Не удалось найти пользователя.")
-                return
-            if target.id == g["leader_id"]:
-                await ctx.send("Нельзя кикнуть лидера.")
-                return
-            target_role_data = self.db.get_guild_member(g["id"], target.id)
-            if not target_role_data:
-                await ctx.send(f"{target.mention} не в вашей гильдии.")
-                return
-            self.db.leave_guild(target.id)
-            try:
-                role = ctx.guild.get_role(g["color"]) if g["color"] else None
-                if role:
-                    await target.remove_roles(role, reason="Кик из гильдии")
-            except Exception:
-                pass
-            await ctx.send(f"{target.mention} исключён из [{g['tag']}].")
-        elif sub == "disband":
-            g = self.db.get_guild_by_leader(ctx.author.id)
-            if not g:
-                await ctx.send("Только лидер может распустить гильдию.")
-                return
-            members = self.db.get_guild_members(g["id"])
-            self.db.disband_guild(g["id"])
-            try:
-                role = ctx.guild.get_role(g["color"]) if g["color"] else None
-                if role:
-                    for m in members:
-                        mem = ctx.guild.get_member(m["discord_id"])
-                        if mem:
-                            await mem.remove_roles(role, reason="Гильдия распущена")
-                    await role.delete(reason="Гильдия распущена")
-            except Exception:
-                pass
-            await ctx.send(f"❌ Гильдия **[{g['tag']}] {g['name']}** распущена.")
-        elif sub == "set_leader":
-            if not arg:
-                await ctx.send("Укажите пользователя: `!guild set_leader @user`")
-                return
-            g = self.db.get_guild_by_leader(ctx.author.id)
-            if not g:
-                await ctx.send("Только текущий лидер может передать лидерство.")
-                return
-            target = ctx.mentions[0] if ctx.mentions else None
-            if not target:
-                await ctx.send("Не удалось найти пользователя.")
-                return
-            target_member = self.db.get_guild_member(g["id"], target.id)
-            if not target_member:
-                await ctx.send(f"{target.mention} не в вашей гильдии.")
-                return
-            self.db.set_guild_member_role(g["id"], ctx.author.id, "member")
-            self.db.set_guild_member_role(g["id"], target.id, "leader")
-            self.db.conn.execute(
-                "UPDATE guilds SET leader_id=? WHERE id=?", (target.id, g["id"]))
-            self.db.conn.commit()
-            await ctx.send(
-                f"👑 Лидерство передано: {target.mention} теперь лидер **[{g['tag']}]**!")
-        else:
-            await ctx.send(
-                "**Команды гильдий:**\n"
-                "`!guild create` — создать гильдию\n"
-                "`!guild info` — моя гильдия\n"
-                "`!guild list` — все гильдии\n"
-                "`!guild invite @user` — пригласить\n"
-                "`!guild kick @user` — исключить\n"
-                "`!guild disband` — распустить\n"
-                "`!guild set_leader @user` — передать лидерство")
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DotaStats(bot))
