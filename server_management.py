@@ -721,9 +721,9 @@ class VoiceRoomSetupView(discord.ui.View):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
             member: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, manage_channels=True),
+                view_channel=True, connect=True, speak=True, manage_channels=True, stream=True),
             interaction.guild.me: discord.PermissionOverwrite(
-                view_channel=True, connect=True, manage_channels=True),
+                view_channel=True, connect=True, manage_channels=True, stream=True),
         }
 
         if self.rank != "any" and self.rank in RANK_ORDER:
@@ -734,7 +734,7 @@ class VoiceRoomSetupView(discord.ui.View):
                     role = discord.utils.get(guild.roles, name=tier_name)
                     if role:
                         overwrites[role] = discord.PermissionOverwrite(
-                            view_channel=True, connect=True, speak=True)
+                            view_channel=True, connect=True, speak=True, stream=True)
 
         temp = await guild.create_voice_channel(
             name=ch_name, category=category, user_limit=self.size,
@@ -793,11 +793,11 @@ class GuestVoiceView(discord.ui.View):
             category = interaction.channel.category
 
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, stream=True),
             member: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, manage_channels=True),
+                view_channel=True, connect=True, speak=True, manage_channels=True, stream=True),
             interaction.guild.me: discord.PermissionOverwrite(
-                view_channel=True, connect=True, manage_channels=True),
+                view_channel=True, connect=True, manage_channels=True, stream=True),
         }
 
         temp = await guild.create_voice_channel(
@@ -1024,7 +1024,7 @@ async def _start_quick_match(guild: discord.Guild, storage: Storage):
     if verified:
         overwrites[verified] = discord.PermissionOverwrite(view_channel=True, connect=False)
     for p in players:
-        overwrites[p] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+        overwrites[p] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, stream=True)
 
     names = ", ".join(p.display_name for p in players)
     vc = await guild.create_voice_channel(
@@ -2648,7 +2648,7 @@ class ServerManagement(commands.Cog):
         if not jtc_category:
             jtc_category = await guild.create_category(JOIN_TO_CREATE_CATEGORY)
         await jtc_category.set_permissions(everyone, view_channel=False)
-        await jtc_category.set_permissions(verified, view_channel=True, connect=True)
+        await jtc_category.set_permissions(verified, view_channel=True, connect=True, stream=True)
 
         # ---- канал создания голосовых комнат ----
         vr_create = discord.utils.get(guild.text_channels, name=VOICE_ROOM_CREATE_CHANNEL)
@@ -2767,7 +2767,7 @@ class ServerManagement(commands.Cog):
         elif mod_log.category != staff_category:
             await mod_log.edit(category=staff_category)
 
-        # ---- закреплённые справки (ЛФГ и лидерборд — сразу с кнопками) ----
+        # ---- закреплённые справки (ЛФГ, лидерборд, ивенты — сразу с кнопками) ----
         for ch_name, (title, text) in PINNED_INFO.items():
             ch = discord.utils.get(guild.text_channels, name=ch_name)
             if not ch:
@@ -2778,120 +2778,81 @@ class ServerManagement(commands.Cog):
                 await post_pinned_info(ch, title, text, view=LeaderboardPanelView(self.db))
             elif ch_name == WEEKLY_META_CHANNEL:
                 await post_pinned_info(ch, title, text, view=NotifyRoleView())
+            elif ch_name == "🎉-ивенты":
+                await post_pinned_info(ch, title, text, view=CalendarView())
             else:
                 await post_pinned_info(ch, title, text)
 
-        # ---- 📊 мои матчи (в лидерборд) ----
+        # ---- 🏆 лидерборд: ОДИН пин с 4 кнопками (вместо 4 отдельных) ----
         lb_ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL)
         if lb_ch:
-            mm_embed = discord.Embed(
-                title="📊 Мои матчи",
-                description="Нажмите, чтобы увидеть последние 5 матчей.",
-                color=0x8B4513)
             lb_pins = await lb_ch.pins()
-            has_mm = any(
-                e.title == "📊 Мои матчи" for p in lb_pins if p.embeds
+            has_lb_combined = any(
+                e.title == "🏆 Панель сервера" for p in lb_pins if p.embeds
                 for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_mm:
-                mm_msg = await lb_ch.send(embed=mm_embed, view=MyMatchesView(self.db))
+            if not has_lb_combined:
+                lb_combined_embed = discord.Embed(
+                    title="🏆 Панель сервера",
+                    description=(
+                        "**Вся статистика в одном месте**\n"
+                        "Нажмите кнопку ниже, чтобы получить информацию."
+                    ),
+                    color=0x8B4513)
+                lb_combined_view = discord.ui.View()
+                lb_combined_view.add_item(discord.ui.Button(
+                    label="Показать лидерборд", emoji="🏆",
+                    style=discord.ButtonStyle.primary, custom_id="leaderboard:show"))
+                lb_combined_view.add_item(discord.ui.Button(
+                    label="Мои матчи", emoji="📊",
+                    style=discord.ButtonStyle.secondary, custom_id="matches:my"))
+                lb_combined_view.add_item(discord.ui.Button(
+                    label="Мой прогресс", emoji="📈",
+                    style=discord.ButtonStyle.secondary, custom_id="mmr:progress"))
+                lb_combined_view.add_item(discord.ui.Button(
+                    label="Стать дуэлянтом", emoji="⚔️",
+                    style=discord.ButtonStyle.primary, custom_id="duelist:toggle"))
+                lb_msg = await lb_ch.send(embed=lb_combined_embed, view=lb_combined_view)
                 try:
-                    await mm_msg.pin()
+                    await lb_msg.pin()
                 except discord.Forbidden:
                     pass
 
-            # ---- 📈 прогресс MMR (в лидерборд) ----
-            mmr_embed = discord.Embed(
-                title="📈 Мой прогресс",
-                description="Нажмите, чтобы увидеть ваш статистику и прогресс.",
-                color=0x8B4513)
-            has_mmr = any(
-                e.title == "📈 Мой прогресс" for p in lb_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_mmr:
-                mmr_msg = await lb_ch.send(embed=mmr_embed, view=MMRProgressView(self.db))
-                try:
-                    await mmr_msg.pin()
-                except discord.Forbidden:
-                    pass
-
-            # ---- ⚔️ роль дуэлянта (в лидерборд) ----
-            duelist_embed = discord.Embed(
-                title="⚔️ Дуэлянты",
-                description=(
-                    "Нажмите кнопку, чтобы стать дуэлянтом!\n"
-                    "Только обладатели этой роли участвуют в недельных дуэлях."
-                ),
-                color=0xE67E22)
-            has_duelist = any(
-                e.title == "⚔️ Дуэлянты" for p in lb_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_duelist:
-                duelist_msg = await lb_ch.send(embed=duelist_embed, view=DuelistRoleView())
-                try:
-                    await duelist_msg.pin()
-                except discord.Forbidden:
-                    pass
-
-        # ---- 🤝 наставники (в правилах) ----
+        # ---- 📜 правила: ОДИН пин с 3 кнопками (вместо 4 отдельных) ----
         rules_ch = discord.utils.get(guild.text_channels, name="📜-правила")
         if rules_ch:
-            mentor_embed = discord.Embed(
-                title="🤝 Наставники",
-                description=(
-                    "Опытные игроки могут стать наставниками.\n"
-                    "Новички — нажмите кнопку, чтобы увидеть список наставников."
-                ),
-                color=0x8B4513)
             rules_pins = await rules_ch.pins()
-            has_mentor = any(
-                e.title == "🤝 Наставники" for p in rules_pins if p.embeds
+            has_rules_combined = any(
+                e.title == "📜 Правила и навигация" for p in rules_pins if p.embeds
                 for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_mentor:
-                mentor_view = discord.ui.View()
-                mentor_view.add_item(discord.ui.Button(
-                    label="Стать наставником", emoji="🤝",
-                    style=discord.ButtonStyle.primary, custom_id="mentor:toggle"))
-                mentor_view.add_item(discord.ui.Button(
-                    label="Список наставников", emoji="📋",
+            if not has_rules_combined:
+                rules_combined_embed = discord.Embed(
+                    title="📜 Правила и навигация",
+                    description=(
+                        "1. Уважайте других игроков — без оскорблений и токсичности.\n"
+                        "2. Репорт в игре ≠ репорт здесь — жалобы через Valve.\n"
+                        "3. Флуд и реклама сторонних серверов — бан.\n"
+                        "4. Роль по рангу выдаётся автоматически, обновляется раз в сутки.\n"
+                        "5. Спорные ситуации — в #🛠-mod-log.\n\n"
+                        "Нажмите кнопку ниже для подробной информации."
+                    ),
+                    color=0x8B4513)
+                rules_combined_view = discord.ui.View()
+                rules_combined_view.add_item(discord.ui.Button(
+                    label="Навигация по серверу", emoji="📋",
+                    style=discord.ButtonStyle.success, custom_id="navigation:show"))
+                rules_combined_view.add_item(discord.ui.Button(
+                    label="Частые вопросы", emoji="❓",
+                    style=discord.ButtonStyle.primary, custom_id="faq:show"))
+                rules_combined_view.add_item(discord.ui.Button(
+                    label="Наставники", emoji="🤝",
                     style=discord.ButtonStyle.secondary, custom_id="mentor:list"))
-                mentor_msg = await rules_ch.send(embed=mentor_embed, view=mentor_view)
+                rules_msg = await rules_ch.send(embed=rules_combined_embed, view=rules_combined_view)
                 try:
-                    await mentor_msg.pin()
+                    await rules_msg.pin()
                 except discord.Forbidden:
                     pass
 
-            # ---- ❓ FAQ (в правилах) ----
-            faq_embed = discord.Embed(
-                title="❓ Частые вопросы",
-                description="Нажмите кнопку, чтобы увидеть ответы на частые вопросы.",
-                color=0x8B4513)
-            has_faq = any(
-                e.title == "❓ Частые вопросы" for p in rules_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_faq:
-                faq_msg = await rules_ch.send(embed=faq_embed, view=FAQView())
-                try:
-                    await faq_msg.pin()
-                except discord.Forbidden:
-                    pass
-
-        # ---- 📅 календарь (в ивенты) ----
-        ev_ch = discord.utils.get(guild.text_channels, name=STREAMS_CHANNEL)
-        if ev_ch:
-            cal_embed = discord.Embed(
-                title="📅 Ближайшие события",
-                description="Нажмите кнопку, чтобы увидеть календарь сервера.",
-                color=0x8B4513)
-            ev_pins = await ev_ch.pins()
-            has_cal = any(
-                e.title == "📅 Ближайшие события" for p in ev_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_cal:
-                cal_msg = await ev_ch.send(embed=cal_embed, view=CalendarView())
-                try:
-                    await cal_msg.pin()
-                except discord.Forbidden:
-                    pass
+        # ---- календарь теперь вшит в пин ивентов (см. PINNED_INFO) ----
 
         # ---- ⚠️ модерация кнопки (staff-only канал) ----
         mod_tools_ch = discord.utils.get(guild.text_channels, name="🛠-инструменты")
@@ -2922,23 +2883,7 @@ class ServerManagement(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # ---- 📋 навигация (в канал правил) ----
-        nav_ch = discord.utils.get(guild.text_channels, name=NAVIGATION_CHANNEL)
-        if nav_ch:
-            nav_embed = discord.Embed(
-                title="📋 Где что находится?",
-                description="Нажмите кнопку, чтобы увидеть полную карту сервера.",
-                color=0x8B4513)
-            nav_pins = await nav_ch.pins()
-            has_nav = any(
-                e.title == "📋 Где что находится?" for p in nav_pins if p.embeds
-                for e in [p.embeds[0]] if hasattr(e, 'title'))
-            if not has_nav:
-                nav_msg = await nav_ch.send(embed=nav_embed, view=NavigationView())
-                try:
-                    await nav_msg.pin()
-                except discord.Forbidden:
-                    pass
+        # ---- навигация теперь вшита в пин правил (см. rules_combined) ----
 
         # ---- 📺 стримы (в ивенты) ----
         events_ch = discord.utils.get(guild.text_channels, name=STREAMS_CHANNEL)
@@ -3052,7 +2997,7 @@ class ServerManagement(commands.Cog):
             INFO_CATEGORY, COMMUNITY_CATEGORY, STRATEGY_CATEGORY, GAME_CATEGORY,
             SHOP_CATEGORY, JOIN_TO_CREATE_CATEGORY, STATS_CATEGORY, STAFF_CATEGORY,
             GUEST_CATEGORY,
-        }
+        } | set(RANK_GROUPS.keys())  # + ранговые категории
         deleted_count = 0
 
         # удаление старых голосовых каналов-счётчиков (👥 Участников / ✅ Верифицировано)
