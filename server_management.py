@@ -1767,7 +1767,6 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(HeroRollView())
         self.bot.add_view(NotifyRoleView())
         self.bot.add_view(VoiceRoomCreateView(self.db))
-        self.bot.add_view(GuestVoiceView(self.db))
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(VoiceReportView())
         self.bot.add_view(QuickMatchView(self.db))
