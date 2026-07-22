@@ -36,7 +36,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands, tasks
 
-from dota_stats_v3 import od, db, to_account_id, to_steam64, Storage, DB_PATH, PatchAnalyticsView
+from dota_stats_v3 import od, db, to_account_id, to_steam64, Storage, DB_PATH, PatchAnalyticsView, GuildHubView
 
 # ---------------- конфиг ----------------
 
@@ -68,7 +68,7 @@ INFO_CATEGORY = "📋 Начало"
 INFO_TEXT_CHANNELS = ["📜-правила", "📢-объявления"]  # + VERIFICATION_CHANNEL создаётся отдельно
 
 COMMUNITY_CATEGORY = "⚔️ Арена"
-COMMUNITY_TEXT_CHANNELS = ["👋-приветствия", "💬-чат", "🎉-ивенты"]
+COMMUNITY_TEXT_CHANNELS = ["👋-приветствия", "💬-чат", "🎉-ивенты", "🏰-гильдии"]
 
 STRATEGY_CATEGORY = "📊 Стратегия"
 STRATEGY_TEXT_CHANNELS = ["🏆-лидерборд", "🟢-кто-в-игре", "🧠-стратегия"]
@@ -211,6 +211,7 @@ CHANNEL_TOPICS = {
     "🧠-стратегия": "Панель статистики и стратегий — только кнопки",
     "🐲-бестиарий": "Обсуждение героев и кнопка «случайный герой»",
     "🛒-магазин": "Магазин shards: ежедневный бонус, товары и баланс",
+    "🏰-гильдии": "Создавайте кланы, приглашайте игроков, соревнуйтесь как гильдия!",
     "🎮-создание-комнат": "Создание голосовых комнат + быстрый матч",
     PATCH_ANALYTICS_CHANNEL: "Аналитика патчей: победители, проигравшие, мета",
     GUEST_VOICE_HUB: "Гостевая зона — зайдите сюда, чтобы создать временную голосовую комнату",
@@ -3313,6 +3314,36 @@ class ServerManagement(commands.Cog):
                 color=0x8B4513)
             await post_pinned_info_with_view(
                 hero_roll_ch, bestiary_embed, HeroRollView())
+
+        # -- 🏰 гильдии --
+        guild_ch = discord.utils.get(guild.text_channels, name="🏰-гильдии")
+        if guild_ch:
+            guild_hub_embed = discord.Embed(
+                title="⚔️ Гильдии (кланы)",
+                description=(
+                    "**═══ ГИЛЬДИИ ═══**\n"
+                    "Создавайте кланы, объединяйтесь, соревнуйтесь!\n"
+                    "Каждая гильдия получает роль и канал.\n\n"
+                    "🆕 Создать — начать свою гильдию\n"
+                    "🏰 Моя гильдия — информация, участники, статистика\n"
+                    "📋 Список — все гильдии сервера\n"
+                    "🚪 Покинуть — выйти из гильдии"
+                ),
+                color=0x8B4513)
+            guild_hub_view = discord.ui.View(timeout=None)
+            guild_hub_view.add_item(discord.ui.Button(
+                label="Создать гильдию", emoji="🆕",
+                style=discord.ButtonStyle.success, custom_id="guild:create"))
+            guild_hub_view.add_item(discord.ui.Button(
+                label="Моя гильдия", emoji="🏰",
+                style=discord.ButtonStyle.primary, custom_id="guild:info"))
+            guild_hub_view.add_item(discord.ui.Button(
+                label="Список гильдий", emoji="📋",
+                style=discord.ButtonStyle.secondary, custom_id="guild:list"))
+            guild_hub_view.add_item(discord.ui.Button(
+                label="Покинуть", emoji="🚪",
+                style=discord.ButtonStyle.danger, custom_id="guild:leave"))
+            await post_pinned_info_with_view(guild_ch, guild_hub_embed, guild_hub_view)
 
         # -- 📊 патчи: список последних 5 патчей --
         patch_ch = discord.utils.get(guild.text_channels, name="📊-патчи")

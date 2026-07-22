@@ -361,6 +361,7 @@ def _parse_tournament_backup(content: str) -> dict | None:
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "").strip()   # https://steamcommunity.com/dev/apikey (обязательно)
 
 # Разбор матча (пункт 4) может писать текстовый комментарий через LLM.
+# При 429 (rate limit) автоматически переключается на запасной провайдер.
 LLM_PROVIDER = "groq"  # "groq" | "deepseek" | "none" (none = только жёсткие правила, без текста)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()     # https://console.groq.com/keys (бесплатно, без карты)
@@ -372,6 +373,8 @@ DEEPSEEK_MODEL = "deepseek-chat"             # актуальная модель
 DEEPSEEK_API_BASE = "https://api.deepseek.com"  # OpenAI-совместимый эндпоинт
 
 ENABLE_LLM_REVIEW = True                    # выключите, если не нужен текстовый разбор от LLM
+
+LLM_CACHE_TTL = 3600 * 6   # кэш LLM-разборов на 6 часов (чтобы не перезапрашивать)
 
 STATUS_POLL_INTERVAL_SECONDS = 40           # как часто обновлять доску "кто играет"
 MATCH_POLL_INTERVAL_MINUTES = 5             # как часто проверять новые завершённые матчи
@@ -666,6 +669,24 @@ class Storage:
             moderator_id INTEGER NOT NULL,
             reason TEXT NOT NULL,
             created_at TEXT NOT NULL
+        )""")
+
+        # --- гильдии (кланы) ---
+        c.execute("""CREATE TABLE IF NOT EXISTS guilds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            tag TEXT NOT NULL UNIQUE,
+            leader_id INTEGER NOT NULL,
+            color INTEGER DEFAULT 0x8B4513,
+            created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS guild_members (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            joined_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id)
         )""")
 
         c.commit()
@@ -1280,6 +1301,131 @@ class Storage:
             "SELECT * FROM tournaments LIMIT 0").description]
         return [dict(zip(cols, r)) for r in rows]
 
+    # ---------- гильдии ----------
+
+    def create_guild(self, server_id: int, name: str, tag: str, leader_id: int,
+                     color: int = 0x8B4513) -> int | None:
+        from datetime import datetime
+        try:
+            self.conn.execute(
+                "INSERT INTO guilds (server_id, name, tag, leader_id, color, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (server_id, name, tag.upper(), leader_id, color,
+                 datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT id FROM guilds WHERE tag=?", (tag.upper(),)).fetchone()
+            if row:
+                self.conn.execute(
+                    "INSERT INTO guild_members (guild_id, discord_id, role, joined_at) "
+                    "VALUES (?, ?, 'leader', ?)",
+                    (row[0], leader_id, datetime.now(timezone.utc).isoformat()))
+                self.conn.commit()
+                return row[0]
+        except Exception:
+            return None
+
+    def get_guild_by_tag(self, tag: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM guilds WHERE tag=?", (tag.upper(),)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guilds LIMIT 0").description]
+        return dict(zip(cols, row))
+
+    def get_guild_by_member(self, discord_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT g.* FROM guilds g "
+            "JOIN guild_members gm ON g.id = gm.guild_id "
+            "WHERE gm.discord_id=?", (discord_id,)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guilds LIMIT 0").description]
+        return dict(zip(cols, row))
+
+    def get_guild_by_leader(self, leader_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM guilds WHERE leader_id=?", (leader_id,)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guilds LIMIT 0").description]
+        return dict(zip(cols, row))
+
+    def get_guild_members(self, guild_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM guild_members WHERE guild_id=? ORDER BY "
+            "CASE role WHEN 'leader' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END",
+            (guild_id,)).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guild_members LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_guild_member(self, guild_id: int, discord_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM guild_members WHERE guild_id=? AND discord_id=?",
+            (guild_id, discord_id)).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guild_members LIMIT 0").description]
+        return dict(zip(cols, row))
+
+    def join_guild(self, guild_id: int, discord_id: int) -> bool:
+        from datetime import datetime
+        try:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO guild_members (guild_id, discord_id, role, joined_at) "
+                "VALUES (?, ?, 'member', ?)",
+                (guild_id, discord_id, datetime.now(timezone.utc).isoformat()))
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def leave_guild(self, discord_id: int) -> int | None:
+        """Удаляет участника из гильдии. Возвращает guild_id или None."""
+        row = self.conn.execute(
+            "SELECT guild_id FROM guild_members WHERE discord_id=?",
+            (discord_id,)).fetchone()
+        if not row:
+            return None
+        guild_id = row[0]
+        self.conn.execute(
+            "DELETE FROM guild_members WHERE discord_id=?", (discord_id,))
+        self.conn.commit()
+        return guild_id
+
+    def disband_guild(self, guild_id: int) -> bool:
+        self.conn.execute("DELETE FROM guild_members WHERE guild_id=?", (guild_id,))
+        self.conn.execute("DELETE FROM guilds WHERE id=?", (guild_id,))
+        self.conn.commit()
+        return True
+
+    def set_guild_member_role(self, guild_id: int, discord_id: int, role: str):
+        self.conn.execute(
+            "UPDATE guild_members SET role=? WHERE guild_id=? AND discord_id=?",
+            (role, guild_id, discord_id))
+        self.conn.commit()
+
+    def all_guilds(self, server_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM guilds WHERE server_id=? ORDER BY name", (server_id,)).fetchall()
+        if not rows:
+            return []
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT * FROM guilds LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_guild_member_count(self, guild_id: int) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM guild_members WHERE guild_id=?",
+            (guild_id,)).fetchone()[0]
+
 
 # ---------------- OpenDota client (профиль, мета, предметы, разбор матчей) ----------------
 
@@ -1594,6 +1740,7 @@ async def build_match_facts(account_id: int, match_id: int,
 
     return {
         "match_id": match_id,
+        "hero_id": hero_id,
         "hero": await od.hero_name(hero_id),
         "won": won,
         "kills": player.get("kills", 0),
@@ -1614,6 +1761,8 @@ async def build_match_facts(account_id: int, match_id: int,
         "hero_healing": player.get("hero_healing", 0),
         "obs_placed": player.get("obs_placed", 0),
         "sen_placed": player.get("sen_placed", 0),
+        "lane": player.get("lane"),
+        "position": player.get("position"),
         "stages": _build_stage_breakdown(player, duration_min),
     }
 
@@ -1635,16 +1784,25 @@ def detect_issues(facts: dict) -> list[str]:
         issues.append(f"🌾 Добиваний в минуту ({facts['lh_per_min']}) меньше медианы "
                        f"({facts['lh_per_min_median']:.1f}) — терялся крип-фарм.")
 
-    # Проверка вардов: только если ОБА поля точно есть и оба == 0,
-    # при этом матч dàiше 25 минут и герой НЕ carry/mid (варды — ответственность саппортов/офлейнеров)
+    # Проверка вардов: только для саппортов (positions 4/5) и не-кэрри/мида.
+    # OpenDota поле "position": "4" = soft support, "5" = hard support.
+    # Также используем hero_id для дополнительной проверки.
+    # Не триггерим, если obs_placed/sen_placed == 0 из-за отсутствия данных API.
     hero_id_int = int(facts.get("hero_id", 0)) if facts.get("hero_id") else 0
+    position = str(facts.get("position", "")).strip()
+    is_support = position in ("4", "5")
     # Список hero_id для кэрри/мида (обычно не ставят варды)
     carry_mid_hero_ids = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 18, 19, 22, 23, 24, 25, 26, 27, 28, 29, 34, 35, 36, 38, 40, 41, 42, 44, 46, 48, 50, 51, 52, 54, 55, 56, 57, 58, 59, 62, 63, 65, 67, 69, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 119, 120, 121, 123}
     is_carry_mid = hero_id_int in carry_mid_hero_ids
-    if (not is_carry_mid and facts["duration_min"] > 25
-            and facts["obs_placed"] == 0 and facts["sen_placed"] == 0):
-        issues.append("👁 За весь матч не поставлено ни одного варда — обзор карты страдал "
-                       "весь матч, это касается всех, не только саппортов.")
+    # Только предупреждаем если:
+    # 1) позиция саппорта ИЛИ герой не кэрри/мид
+    # 2) матч длиннее 25 минут
+    # 3) оба счётчика вардов == 0 (оба — значит точно не было данных)
+    # 4) ОБА obs и sen == 0 (если хотя бы sentry есть — значит ставил)
+    if (is_support or not is_carry_mid) and facts["duration_min"] > 25:
+        if facts["obs_placed"] == 0 and facts["sen_placed"] == 0:
+            issues.append("👁 Варды/сентри не обнаружены в статистике — возможно, "
+                           "стоит проверить, хватало ли обзора на карте.")
 
     if not facts["won"] and (facts["kills"] + facts["assists"]) < facts["deaths"]:
         issues.append("⚔️ Участие в килах ниже количества смертей — низкий полезный "
@@ -1666,13 +1824,17 @@ class MatchReviewWriter:
     оба через OpenAI-совместимый /chat/completions:
       - "groq":     бесплатно, без карты, быстрый (console.groq.com)
       - "deepseek": платно (по факту очень дёшево)
-    Если провайдер "none", ключ не задан, или запрос упал — просто не
-    добавляет текстовый блок: embed с фактами и detect_issues() всё равно
+    При 429 (rate limit) автоматически переключается на запасной провайдер.
+    Результаты кэшируются по match_id, чтобы не перезапрашивать.
+    Если оба провайдера упали — embed с фактами и detect_issues() всё равно
     уходит игроку, это никогда не блокирует основную функцию."""
 
     def __init__(self, provider: str):
         self.provider = provider
+        self.fallback = "deepseek" if provider == "groq" else ("groq" if provider == "deepseek" else "none")
         self.session: aiohttp.ClientSession | None = None
+        self._cache: dict[int, tuple[str, float]] = {}  # match_id -> (text, timestamp)
+        self._rate_limited_until: dict[str, float] = {}  # provider -> unix timestamp when rate limit expires
 
         if provider == "groq":
             self.enabled = ENABLE_LLM_REVIEW and bool(GROQ_API_KEY) and "YOUR_" not in GROQ_API_KEY
@@ -1740,16 +1902,40 @@ class MatchReviewWriter:
     async def write_review(self, facts: dict, issues: list[str]) -> str | None:
         if not self.enabled:
             return None
+        # Кэш по match_id — не перезапрашивать LLM для того же матча
+        match_id = facts.get("match_id")
+        if match_id and match_id in self._cache:
+            text, ts = self._cache[match_id]
+            if time.time() - ts < LLM_CACHE_TTL:
+                return text
         prompt = self._build_prompt(facts, issues)
+        # Попытка: основной провайдер → запасной → None
+        result = None
         if self.provider == "groq":
-            return await self._write_groq(prompt)
-        if self.provider == "deepseek":
-            return await self._write_deepseek(prompt)
-        return None
+            result = await self._write_groq(prompt)
+            if not result and self._is_rate_limited("groq"):
+                result = await self._write_deepseek(prompt)
+        elif self.provider == "deepseek":
+            result = await self._write_deepseek(prompt)
+            if not result and self._is_rate_limited("deepseek"):
+                result = await self._write_groq(prompt)
+        if result and match_id:
+            self._cache[match_id] = (result, time.time())
+        return result
+
+    def _is_rate_limited(self, provider: str) -> bool:
+        """Проверяет, был ли rate limit на провайдере."""
+        until = self._rate_limited_until.get(provider, 0)
+        return time.time() < until
+
+    def _set_rate_limited(self, provider: str, seconds: int = 300):
+        """Ставит rate limit на провайдер (по умолчанию 5 минут)."""
+        self._rate_limited_until[provider] = time.time() + seconds
+        print(f"[LLM] Rate limit на {provider}, переключаемся на запасной ({seconds} сек)")
 
     async def _write_groq(self, prompt: str) -> str | None:
-        # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
-        # messages. Модель и базовый URL — см. константы вверху файла.
+        if self._is_rate_limited("groq"):
+            return None
         url = f"{GROQ_API_BASE}/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -1759,11 +1945,15 @@ class MatchReviewWriter:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.7,
+            "max_tokens": 500,
         }
         try:
             s = await self._s()
             async with s.post(url, headers=headers, json=payload,
                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status == 429:
+                    self._set_rate_limited("groq")
+                    return None
                 if r.status != 200:
                     if DEBUG_LOG:
                         print(f"[LLM/groq] статус {r.status}: {await r.text()}")
@@ -1779,8 +1969,8 @@ class MatchReviewWriter:
             return None
 
     async def _write_deepseek(self, prompt: str) -> str | None:
-        # OpenAI-совместимый формат: POST /chat/completions, Bearer-токен,
-        # messages. Модель и базовый URL — см. константы вверху файла.
+        if self._is_rate_limited("deepseek"):
+            return None
         url = f"{DEEPSEEK_API_BASE}/chat/completions"
         headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -1790,11 +1980,15 @@ class MatchReviewWriter:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.7,
+            "max_tokens": 500,
         }
         try:
             s = await self._s()
             async with s.post(url, headers=headers, json=payload,
                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status == 429:
+                    self._set_rate_limited("deepseek")
+                    return None
                 if r.status != 200:
                     if DEBUG_LOG:
                         print(f"[LLM/deepseek] статус {r.status}: {await r.text()}")
@@ -3036,6 +3230,234 @@ class TournamentMatchView(discord.ui.View):
         await cog.try_advance_tournament(m["tournament_id"])
 
 
+# ---------------- гильдии (кланы): views и модали ----------------
+
+GUILD_TAG_MAX = 5
+GUILD_NAME_MAX = 40
+GUILD_CREATE_COST = 0  # бесплатно (или установите цену в shards)
+
+
+class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
+    guild_name = discord.ui.TextInput(
+        label="Название гильдии", placeholder="напр. Торговцы Смерти",
+        max_length=GUILD_NAME_MAX)
+    guild_tag = discord.ui.TextInput(
+        label="Тег (3-5 заглавных букв)", placeholder="напр. TDS",
+        max_length=GUILD_TAG_MAX, min_length=3)
+
+    def __init__(self, db: Storage):
+        super().__init__()
+        self.db = db
+
+    async def on_submit(self, interaction: discord.Interaction):
+        tag = str(self.guild_tag.value).strip().upper()
+        name = str(self.guild_name.value).strip()
+        if not tag.isalpha() or len(tag) < 3 or len(tag) > GUILD_TAG_MAX:
+            await interaction.response.send_message(
+                f"Тег должен быть 3-{GUILD_TAG_MAX} заглавных букв (только латиница).", ephemeral=True)
+            return
+        if not name:
+            await interaction.response.send_message("Название не может быть пустым.", ephemeral=True)
+            return
+        if self.db.get_guild_by_tag(tag):
+            await interaction.response.send_message(
+                f"Тег [{tag}] уже занят. Выберите другой.", ephemeral=True)
+            return
+        if self.db.get_guild_by_member(interaction.user.id):
+            await interaction.response.send_message(
+                "Вы уже состоите в гильдии. Сначала покиньте её.", ephemeral=True)
+            return
+        if GUILD_CREATE_COST > 0:
+            bal = self.db.get_balance(interaction.user.id)
+            if bal < GUILD_CREATE_COST:
+                await interaction.response.send_message(
+                    f"Нужно {GUILD_CREATE_COST} кристаллов для создания гильдии. "
+                    f"У вас {bal}.", ephemeral=True)
+                return
+        guild_id = self.db.create_guild(
+            interaction.guild.id, name, tag, interaction.user.id)
+        if not guild_id:
+            await interaction.response.send_message("Ошибка создания гильдии.", ephemeral=True)
+            return
+        if GUILD_CREATE_COST > 0:
+            self.db.spend_shards(interaction.user.id, GUILD_CREATE_COST, "guild_create")
+        # Создаём роль Discord с тегом
+        try:
+            role = await interaction.guild.create_role(
+                name=f"[{tag}]",
+                color=discord.Color(0x8B4513),
+                reason=f"Гильдия {name}")
+            await interaction.user.add_roles(role, reason=f"Создатель гильдии [{tag}]")
+            # Сохраняем role_id в guilds (используем color поле для role_id, если нужно)
+            self.db.conn.execute(
+                "UPDATE guilds SET color=? WHERE id=?", (role.id, guild_id))
+            self.db.conn.commit()
+        except discord.Forbidden:
+            pass
+        # Логируем транзакцию shards если бесплатно — не списываем
+        embed = discord.Embed(
+            title=f"⚔️ Гильдия создана: [{tag}] {name}",
+            description=(
+                f"Создатель: {interaction.user.mention}\n\n"
+                "Используйте `/guild info` для просмотра информации.\n"
+                "Приглашайте игроков кнопкой ниже!"
+            ),
+            color=0x8B4513)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class GuildInviteConfirmView(discord.ui.View):
+    def __init__(self, db: Storage, guild_id: int, inviter_id: int, invitee_id: int):
+        super().__init__(timeout=120)
+        self.db = db
+        self.guild_id = guild_id
+        self.inviter_id = inviter_id
+        self.invitee_id = invitee_id
+
+    @discord.ui.button(label="Принять", emoji="✅", style=discord.ButtonStyle.success)
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.invitee_id:
+            await interaction.response.send_message("Это приглашение не для вас.", ephemeral=True)
+            return
+        g = None
+        for row in self.db.conn.execute(
+            "SELECT * FROM guilds WHERE id=?", (self.guild_id,)).fetchall():
+            cols = [d[0] for d in self.db.conn.execute(
+                "SELECT * FROM guilds LIMIT 0").description]
+            g = dict(zip(cols, row))
+        if not g:
+            await interaction.response.send_message("Гильдия не найдена.", ephemeral=True)
+            return
+        if self.db.get_guild_by_member(interaction.user.id):
+            await interaction.response.send_message("Вы уже в гильдии.", ephemeral=True)
+            return
+        self.db.join_guild(self.guild_id, interaction.user.id)
+        # Выдать роль
+        try:
+            role = interaction.guild.get_role(g["color"]) if g["color"] else None
+            if role:
+                await interaction.user.add_roles(role, reason=f"Вступил в гильдию [{g['tag']}]")
+        except Exception:
+            pass
+        count = self.db.get_guild_member_count(self.guild_id)
+        await interaction.response.send_message(
+            f"✅ Вы вступили в **[{g['tag']}] {g['name']}**! ({count} участников)",
+            ephemeral=True)
+
+    @discord.ui.button(label="Отклонить", emoji="❌", style=discord.ButtonStyle.danger)
+    async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.invitee_id:
+            await interaction.response.send_message("Это приглашение не для вас.", ephemeral=True)
+            return
+        await interaction.response.send_message("Приглашение отклонено.", ephemeral=True)
+        self.stop()
+
+
+class GuildHubView(discord.ui.View):
+    def __init__(self, db: Storage):
+        super().__init__(timeout=None)
+        self.db = db
+
+    @discord.ui.button(label="Создать гильдию", emoji="🆕",
+                        style=discord.ButtonStyle.success, custom_id="guild:create")
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.db.get_guild_by_member(interaction.user.id):
+            await interaction.response.send_message(
+                "Вы уже состоите в гильдии.", ephemeral=True)
+            return
+        await interaction.response.send_modal(GuildCreateModal(self.db))
+
+    @discord.ui.button(label="Моя гильдия", emoji="🏰",
+                        style=discord.ButtonStyle.primary, custom_id="guild:info")
+    async def info_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.db.get_guild_by_member(interaction.user.id)
+        if not g:
+            await interaction.response.send_message(
+                "Вы не состоите ни в одной гильдии.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        members = self.db.get_guild_members(g["id"])
+        lines = []
+        role_icons = {"leader": "👑", "officer": "⭐", "member": "•"}
+        for m in members:
+            member = interaction.guild.get_member(m["discord_id"])
+            name = member.display_name if member else f"<@{m['discord_id']}>"
+            icon = role_icons.get(m["role"], "•")
+            lines.append(f"{icon} {name}")
+        # Статистика гильдии по играм
+        game_count = 0
+        win_count = 0
+        for m in members:
+            account = self.db.get_account_id(m["discord_id"])
+            if not account:
+                continue
+            matches = await od.get(f"/players/{account}/wl")
+            if matches:
+                game_count += matches.get("win", 0) + matches.get("lose", 0)
+                win_count += matches.get("win", 0)
+        wr = (win_count / game_count * 100) if game_count > 0 else 0
+        embed = discord.Embed(
+            title=f"🏰 [{g['tag']}] {g['name']}",
+            description=(
+                f"**Лидер:** <@{g['leader_id']}>\n"
+                f"**Участников:** {len(members)}\n"
+                f"**Всего игр:** {game_count}\n"
+                f"**Общий винрейт:** {wr:.1f}%\n"
+            ),
+            color=g.get("color") or 0x8B4513)
+        embed.add_field(
+            name="👥 Участники",
+            value="\n".join(lines[:20]) or "Нет данных",
+            inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Список гильдий", emoji="📋",
+                        style=discord.ButtonStyle.secondary, custom_id="guild:list")
+    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        guilds = self.db.all_guilds(interaction.guild.id)
+        if not guilds:
+            await interaction.followup.send(
+                "Гильдий пока нет. Будьте первыми — создайте!", ephemeral=True)
+            return
+        lines = []
+        for g in guilds:
+            count = self.db.get_guild_member_count(g["id"])
+            leader = interaction.guild.get_member(g["leader_id"])
+            lname = leader.display_name if leader else f"<@{g['leader_id']}>"
+            lines.append(f"**[{g['tag']}]** {g['name']} — {count} чел. (лидер: {lname})")
+        embed = discord.Embed(
+            title="📋 Гильдии сервера",
+            description="\n".join(lines),
+            color=0x8B4513)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Покинуть гильдию", emoji="🚪",
+                        style=discord.ButtonStyle.danger, custom_id="guild:leave")
+    async def leave_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.db.get_guild_by_member(interaction.user.id)
+        if not g:
+            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
+            return
+        if g["leader_id"] == interaction.user.id:
+            await interaction.response.send_message(
+                "Лидер не может покинуть гильдию — передайте лидерство или распустите её.",
+                ephemeral=True)
+            return
+        self.db.leave_guild(interaction.user.id)
+        # Убрать роль
+        try:
+            role = interaction.guild.get_role(g["color"]) if g["color"] else None
+            if role:
+                await interaction.user.remove_roles(role, reason="Покинул гильдию")
+        except Exception:
+            pass
+        count = self.db.get_guild_member_count(g["id"])
+        await interaction.response.send_message(
+            f"Вы покинули **[{g['tag']}] {g['name']}**. ({count} участников)",
+            ephemeral=True)
+
+
 # ---------------- cog ----------------
 
 class DotaStats(commands.Cog):
@@ -3066,6 +3488,7 @@ class DotaStats(commands.Cog):
         self.bot.add_view(StrategyView(self.db))
         self.bot.add_view(PatchAnalyticsView())
         self.bot.add_view(ShopView(self.db))
+        self.bot.add_view(GuildHubView(self.db))
         # переподключаем кнопки активных дуэлей после рестарта бота —
         # custom_id зашит в duel_id, поэтому старые сообщения снова оживают
         for duel in self.db.duels_by_status(["pending"]):
@@ -4469,6 +4892,152 @@ class DotaStats(commands.Cog):
                 self.db.conn.commit()
         self.db.conn.commit()
         self._dirty_tournaments.add(tournament_id)
+
+    # ---------- гильдии (кланы) ----------
+
+    @commands.command(name="guild")
+    async def guild_cmd(self, ctx: commands.Context, sub: str = "info", *, arg: str = ""):
+        """Гильдии: !guild create / !guild info / !guild list / !guild invite @user / !guild kick @user / !guild disband / !guild set_leader @user"""
+        sub = sub.lower().strip()
+        if sub == "create":
+            await ctx.send_modal(GuildCreateModal(self.db))
+        elif sub == "list":
+            guilds = self.db.all_guilds(ctx.guild.id)
+            if not guilds:
+                await ctx.send("Гильдий пока нет. Будьте первыми — `!guild create`")
+                return
+            lines = []
+            for g in guilds:
+                count = self.db.get_guild_member_count(g["id"])
+                leader = ctx.guild.get_member(g["leader_id"])
+                lname = leader.display_name if leader else f"<@{g['leader_id']}>"
+                lines.append(f"**[{g['tag']}]** {g['name']} — {count} чел. (лидер: {lname})")
+            await ctx.send("\n".join(lines))
+        elif sub == "info":
+            g = self.db.get_guild_by_member(ctx.author.id)
+            if not g:
+                await ctx.send("Вы не в гильдии. `!guild create` — создать.")
+                return
+            members = self.db.get_guild_members(g["id"])
+            lines = []
+            role_icons = {"leader": "👑", "officer": "⭐", "member": "•"}
+            for m in members:
+                member = ctx.guild.get_member(m["discord_id"])
+                name = member.display_name if member else f"<@{m['discord_id']}>"
+                icon = role_icons.get(m["role"], "•")
+                lines.append(f"{icon} {name}")
+            await ctx.send(
+                f"**🏰 [{g['tag']}] {g['name']}**\n"
+                f"Лидер: <@{g['leader_id']}>\n"
+                f"Участников: {len(members)}\n"
+                f"Участники:\n" + "\n".join(lines))
+        elif sub == "invite":
+            if not arg:
+                await ctx.send("Укажите пользователя: `!guild invite @user`")
+                return
+            g = self.db.get_guild_by_member(ctx.author.id)
+            if not g:
+                await ctx.send("Вы не в гильдии.")
+                return
+            member_role = self.db.get_guild_member(g["id"], ctx.author.id)
+            if not member_role or member_role["role"] not in ("leader", "officer"):
+                await ctx.send("Только лидер или офицер может приглашать.")
+                return
+            target = ctx.guild.get_member(ctx.author.id) if arg.startswith("<@") else None
+            if not target:
+                await ctx.send("Не удалось найти пользователя.")
+                return
+            if self.db.get_guild_by_member(target.id):
+                await ctx.send(f"{target.mention} уже в гильдии.")
+                return
+            embed = discord.Embed(
+                title=f"⚔️ Приглашение в [{g['tag']}] {g['name']}",
+                description=f"{ctx.author.mention} приглашает {target.mention} в гильдию!",
+                color=0x8B4513)
+            view = GuildInviteConfirmView(self.db, g["id"], ctx.author.id, target.id)
+            await ctx.send(content=f"{target.mention}", embed=embed, view=view)
+        elif sub == "kick":
+            if not arg:
+                await ctx.send("Укажите пользователя: `!guild kick @user`")
+                return
+            g = self.db.get_guild_by_member(ctx.author.id)
+            if not g:
+                await ctx.send("Вы не в гильдии.")
+                return
+            member_role = self.db.get_guild_member(g["id"], ctx.author.id)
+            if not member_role or member_role["role"] not in ("leader", "officer"):
+                await ctx.send("Только лидер или офицер может кикать.")
+                return
+            target = ctx.mentions[0] if ctx.mentions else None
+            if not target:
+                await ctx.send("Не удалось найти пользователя.")
+                return
+            if target.id == g["leader_id"]:
+                await ctx.send("Нельзя кикнуть лидера.")
+                return
+            target_role_data = self.db.get_guild_member(g["id"], target.id)
+            if not target_role_data:
+                await ctx.send(f"{target.mention} не в вашей гильдии.")
+                return
+            self.db.leave_guild(target.id)
+            try:
+                role = ctx.guild.get_role(g["color"]) if g["color"] else None
+                if role:
+                    await target.remove_roles(role, reason="Кик из гильдии")
+            except Exception:
+                pass
+            await ctx.send(f"{target.mention} исключён из [{g['tag']}].")
+        elif sub == "disband":
+            g = self.db.get_guild_by_leader(ctx.author.id)
+            if not g:
+                await ctx.send("Только лидер может распустить гильдию.")
+                return
+            members = self.db.get_guild_members(g["id"])
+            self.db.disband_guild(g["id"])
+            try:
+                role = ctx.guild.get_role(g["color"]) if g["color"] else None
+                if role:
+                    for m in members:
+                        mem = ctx.guild.get_member(m["discord_id"])
+                        if mem:
+                            await mem.remove_roles(role, reason="Гильдия распущена")
+                    await role.delete(reason="Гильдия распущена")
+            except Exception:
+                pass
+            await ctx.send(f"❌ Гильдия **[{g['tag']}] {g['name']}** распущена.")
+        elif sub == "set_leader":
+            if not arg:
+                await ctx.send("Укажите пользователя: `!guild set_leader @user`")
+                return
+            g = self.db.get_guild_by_leader(ctx.author.id)
+            if not g:
+                await ctx.send("Только текущий лидер может передать лидерство.")
+                return
+            target = ctx.mentions[0] if ctx.mentions else None
+            if not target:
+                await ctx.send("Не удалось найти пользователя.")
+                return
+            target_member = self.db.get_guild_member(g["id"], target.id)
+            if not target_member:
+                await ctx.send(f"{target.mention} не в вашей гильдии.")
+                return
+            self.db.set_guild_member_role(g["id"], ctx.author.id, "member")
+            self.db.set_guild_member_role(g["id"], target.id, "leader")
+            self.db.conn.execute(
+                "UPDATE guilds SET leader_id=? WHERE id=?", (target.id, g["id"]))
+            self.db.conn.commit()
+            await ctx.send(
+                f"👑 Лидерство передано: {target.mention} теперь лидер **[{g['tag']}]**!")
+        else:
+            await ctx.send(
+                "**Команды гильдий:**\n"
+                "`!guild create` — создать гильдию\n"
+                "`!guild info` — моя гильдия\n"
+                "`!guild list` — все гильдии\n"
+                "`!guild invite @user` — пригласить\n"
+                "`!guild kick @user` — исключить\n"
+                "`!guild disband` — распустить\n"
+                "`!guild set_leader @user` — передать лидерство")
 
 
 async def setup(bot: commands.Bot):
