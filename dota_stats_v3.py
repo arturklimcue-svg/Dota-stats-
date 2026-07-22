@@ -3283,6 +3283,7 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
             if GUILD_CREATE_COST > 0:
                 self.db.spend_shards(interaction.user.id, GUILD_CREATE_COST, "guild_create")
             # Создаём роль Discord с тегом
+            role = None
             try:
                 role = await interaction.guild.create_role(
                     name=f"[{tag}]",
@@ -3294,15 +3295,37 @@ class GuildCreateModal(discord.ui.Modal, title="Создать гильдию"):
                 self.db.conn.commit()
             except Exception as e:
                 print(f"[GUILD] role error: {e}")
+            # Создаём текстовый канал гильдии
+            arena_cat = discord.utils.get(interaction.guild.categories, name="⚔️ Арена")
+            guild_channel = None
+            try:
+                overwrites = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                }
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True)
+                guild_channel = await interaction.guild.create_text_channel(
+                    name=f"[{tag}]-чат",
+                    category=arena_cat,
+                    overwrites=overwrites,
+                    topic=f"Гильдия {name} —频道",
+                    reason=f"Гильдия {name}")
+            except Exception as e:
+                print(f"[GUILD] channel error: {e}")
             embed = discord.Embed(
                 title=f"⚔️ Гильдия создана: [{tag}] {name}",
                 description=(
-                    f"Создатель: {interaction.user.mention}\n\n"
-                    "Используйте `/guild info` для просмотра информации.\n"
-                    "Приглашайте игроков кнопкой ниже!"
+                    f"Создатель: {interaction.user.mention}\n"
+                    f"Роль: {'`[' + tag + ']`' if role else 'не создана'}\n"
+                    f"Канал: {guild_channel.mention if guild_channel else 'не создан'}\n\n"
+                    "📩 Нажмите **Пригласить** чтобы добавить игроков!"
                 ),
                 color=0x8B4513)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            leader_view = GuildLeaderView(self.db, guild_id, interaction.user.id)
+            await interaction.response.send_message(
+                embed=embed, view=leader_view, ephemeral=True)
         except Exception as e:
             print(f"[GUILD] create_modal error: {e}")
             try:
@@ -3576,37 +3599,37 @@ class GuildLeaderView(discord.ui.View):
                         style=discord.ButtonStyle.success, custom_id="guild:invite")
     async def invite_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = self.db.get_guild_by_member(interaction.user.id)
-        if not g or g["id"] != self.guild_id:
-            await interaction.response.send_message("Это не ваша гильдия.", ephemeral=True)
+        if not g:
+            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
             return
-        member_data = self.db.get_guild_member(self.guild_id, interaction.user.id)
+        member_data = self.db.get_guild_member(g["id"], interaction.user.id)
         if not member_data or member_data["role"] not in ("leader", "officer"):
             await interaction.response.send_message("Только лидер или офицер может приглашать.", ephemeral=True)
             return
-        await interaction.response.send_modal(GuildInviteModal(self.db, self.guild_id))
+        await interaction.response.send_modal(GuildInviteModal(self.db, g["id"]))
 
     @discord.ui.button(label="Исключить", emoji="🚫",
                         style=discord.ButtonStyle.danger, custom_id="guild:kick")
     async def kick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = self.db.get_guild_by_member(interaction.user.id)
-        if not g or g["id"] != self.guild_id:
-            await interaction.response.send_message("Это не ваша гильдия.", ephemeral=True)
+        if not g:
+            await interaction.response.send_message("Вы не в гильдии.", ephemeral=True)
             return
-        member_data = self.db.get_guild_member(self.guild_id, interaction.user.id)
+        member_data = self.db.get_guild_member(g["id"], interaction.user.id)
         if not member_data or member_data["role"] not in ("leader", "officer"):
             await interaction.response.send_message("Только лидер или офицер может кикать.", ephemeral=True)
             return
-        await interaction.response.send_modal(GuildKickModal(self.db, self.guild_id, self.leader_id))
+        await interaction.response.send_modal(GuildKickModal(self.db, g["id"], g["leader_id"]))
 
     @discord.ui.button(label="Распустить", emoji="💣",
                         style=discord.ButtonStyle.danger, custom_id="guild:disband")
     async def disband_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         g = self.db.get_guild_by_leader(interaction.user.id)
-        if not g or g["id"] != self.guild_id:
-            await interaction.response.send_message("Только лидер может распустить гильдию.", ephemeral=True)
+        if not g:
+            await interaction.response.send_message("Вы не лидер гильдии.", ephemeral=True)
             return
-        members = self.db.get_guild_members(self.guild_id)
-        self.db.disband_guild(self.guild_id)
+        members = self.db.get_guild_members(g["id"])
+        self.db.disband_guild(g["id"])
         try:
             role = interaction.guild.get_role(g["color"]) if g["color"] else None
             if role:
