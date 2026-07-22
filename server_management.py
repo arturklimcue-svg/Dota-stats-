@@ -1731,23 +1731,56 @@ class ToxicityAlertListener(commands.Cog):
 # ---------------- 🤖 панель управления ботом ----------------
 
 class PanelView(discord.ui.View):
-    """Интерактивная панель управления ботом для админов."""
-    def __init__(self):
+    """Интерактивная панель управления ботом для админов.
+    Кнопки напрямую вызывают методы серверного кога."""
+    def __init__(self, bot: commands.Bot = None):
         super().__init__(timeout=None)
+        self._bot = bot
+
+    def _get_cog(self):
+        if self._bot:
+            return self._bot.get_cog("ServerManagement")
+        return None
+
+    def _check_admin(self, interaction):
+        return interaction.user.guild_permissions.administrator
 
     @discord.ui.button(label="Настройка сервера", emoji="⚙️",
                         style=discord.ButtonStyle.danger, custom_id="admin:server_setup_panel")
     async def setup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
+        if not self._check_admin(interaction):
             await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            "⚙️ Выполните `!dota_server_setup` в этом канале.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        cog = self._get_cog()
+        if cog:
+            try:
+                cmd = cog.bot.get_command("dota_server_setup")
+                if cmd:
+                    # Создаём фейковый context для invoke
+                    state = interaction.client._connection
+                    msg = discord.Message(state=state, channel=interaction.channel, data={
+                        "id": 0, "content": "!dota_server_setup",
+                        "author": interaction.user._user_data if hasattr(interaction.user, '_user_data') else {"id": interaction.user.id},
+                        "timestamp": discord.utils.utcnow().isoformat(),
+                        "tts": False, "type": 0, "pinned": False,
+                        "attachments": [], "embeds": [], "mentions": [],
+                        "mention_everyone": False, "role_mentions": [],
+                        "channel_id": str(interaction.channel.id),
+                        "guild_id": str(interaction.guild.id),
+                    })
+                    ctx = await cog.bot.get_context(msg)
+                    await cog.bot.invoke(ctx)
+                    return
+            except Exception as e:
+                print(f"[PANEL] setup error: {e}")
+        await interaction.followup.send(
+            "⚠️ Не удалось. Используйте `!dota_server_setup` в этом канале.", ephemeral=True)
 
     @discord.ui.button(label="Патч-панель", emoji="📊",
                         style=discord.ButtonStyle.secondary, custom_id="admin:patch_panel")
     async def patch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
+        if not self._check_admin(interaction):
             await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
             return
         await interaction.response.send_message(
@@ -1756,35 +1789,53 @@ class PanelView(discord.ui.View):
     @discord.ui.button(label="Список игроков", emoji="📋",
                         style=discord.ButtonStyle.secondary, custom_id="admin:players_list")
     async def players_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
+        if not self._check_admin(interaction):
             await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
             return
         await interaction.response.send_message(
             "📋 Выполните `!dota_players` для списка привязанных игроков.", ephemeral=True)
 
-    @discord.ui.button(label="Очистка", emoji="🧹",
+    @discord.ui.button(label="Очистка сервера", emoji="🧹",
                         style=discord.ButtonStyle.danger, custom_id="admin:cleanup_panel")
     async def cleanup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
+        if not self._check_admin(interaction):
             await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
             return
         await interaction.response.send_message(
-            "🧹 Выполните `!dota_cleanup` для удаления лишних каналов.\n"
-            "⚠️ Безвозвратно удалит каналы вне конфигурации бота.", ephemeral=True)
+            "🧹 Выполните `!dota_cleanup` для удаления лишних каналов.", ephemeral=True)
 
-    @discord.ui.button(label="Очистить этот канал", emoji="🗑️",
-                        style=discord.ButtonStyle.danger, custom_id="admin:purge_channel")
-    async def purge_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+class PanelViewPurge(discord.ui.View):
+    """Выпадающий список каналов для очистки."""
+    def __init__(self, channels: list):
+        super().__init__(timeout=60)
+        options = [
+            discord.SelectOption(label=ch.name, value=str(ch.id), description=f"#{ch.name}")
+            for ch in channels[:25]
+        ]
+        self.select_purge = discord.ui.Select(
+            placeholder="🗑️ Выберите канал для очистки...",
+            min_values=1, max_values=1, custom_id="admin:purge_channel_select",
+            options=options)
+        self.select_purge.callback = self.purge_callback
+        self.add_item(self.select_purge)
+
+    async def purge_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Только для администраторов.", ephemeral=True)
             return
+        ch_id = int(self.select_purge.values[0])
+        channel = interaction.guild.get_channel(ch_id)
+        if not channel:
+            await interaction.response.send_message("❌ Канал не найден.", ephemeral=True)
+            return
         try:
-            deleted = await interaction.channel.purge(limit=100)
+            deleted = await channel.purge(limit=100)
             await interaction.response.send_message(
-                f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
+                f"🗑️ Из #{channel.name} удалено {len(deleted)} сообщений.", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message(
-                "❌ Нет прав на удаление сообщений.", ephemeral=True)
+                f"❌ Нет прав на очистку #{channel.name}.", ephemeral=True)
 
 
 # ---------------- cog ----------------
@@ -1827,7 +1878,7 @@ class ServerManagement(commands.Cog):
         self.bot.add_view(NotifyRoleView())
         self.bot.add_view(VoiceRoomCreateView(self.db))
         self.bot.add_view(PatchAnalyticsView())
-        self.bot.add_view(PanelView())
+        self.bot.add_view(PanelView(self.bot))
         self.bot.add_view(VoiceReportView())
         self.bot.add_view(QuickMatchView(self.db))
         self.bot.add_view(QuickMatchCancelView(0))
@@ -2082,6 +2133,9 @@ class ServerManagement(commands.Cog):
 
         # удаление опустевших временных каналов (с задержкой 1 минута)
         if before.channel:
+            # не удалять голосовые хабы (постоянные каналы)
+            if before.channel.name == GUEST_VOICE_HUB:
+                return
             is_bot_managed = self.db.is_managed_voice_channel(before.channel.id)
             is_protected = self.db.is_voice_protected(
                 before.channel.id, before.channel.category_id if before.channel.category else None,
@@ -2408,34 +2462,40 @@ class ServerManagement(commands.Cog):
         Использование: !panel"""
         embed = discord.Embed(
             title="🤖 Панель управления ботом",
-            description="Нажмите кнопку для быстрого доступа к функциям.",
+            description="Нажмите кнопку — команда выполнится автоматически.",
             color=0x2B2D31)
         embed.add_field(
             name="⚙️ Настройка",
-            value=(
-                "`!dota_server_setup` — полная настройка сервера\n"
-                "`!dota_patch_panel` — панель аналитики патчей\n"
-                "`!panel` — эта панель"
-            ),
-            inline=False)
+            value="Полная настройка сервера, каналов, ролей и категорий",
+            inline=True)
         embed.add_field(
-            name="🧹 Утилиты",
-            value=(
-                "`!dota_players` — список привязанных игроков\n"
-                "`!dota_link_player @user SteamID` — привязка от админа\n"
-                "`!leaderboard` — лидерборд"
-            ),
-            inline=False)
+            name="📊 Аналитика",
+            value="Панель аналитики патчей",
+            inline=True)
         embed.add_field(
-            name="🔧 Модерация",
-            value=(
-                "Кнопки в #🛠-инструменты: предупреждения и таймауты"
-            ),
-            inline=False)
+            name="📋 Игроки",
+            value="Список привязанных игроков",
+            inline=True)
+        embed.add_field(
+            name="🧹 Очистка",
+            value="Удаление каналов вне конфигурации бота",
+            inline=True)
+        embed.add_field(
+            name="🗑️ Очистить чат",
+            value="Выберите канал из списка",
+            inline=True)
         embed.set_footer(text="Только для администраторов")
-        msg = await ctx.send(embed=embed, view=PanelView())
+        channels = [ch for ch in ctx.guild.text_channels if ch.permissions_for(ctx.guild.me).manage_messages]
+        msg = await ctx.send(embed=embed, view=PanelView(self.bot))
         try:
             await msg.pin()
+        except discord.Forbidden:
+            pass
+        purge_msg = await ctx.send(
+            "🗑️ **Очистка чата** — выберите канал:",
+            view=PanelViewPurge(channels))
+        try:
+            await purge_msg.pin()
         except discord.Forbidden:
             pass
         await ctx.send("✅ Панель бота закреплена!", delete_after=5)
@@ -3250,10 +3310,49 @@ class ServerManagement(commands.Cog):
                 except discord.HTTPException:
                     pass
 
+        # ---- удаление старых пинов бота (кнопки/embeds из прошлых конфигураций) ----
+        me = guild.me
+        known_pins = {
+            "📜 Правила сервера", "👋 Добро пожаловать", "🎮 Создать голосовую комнату",
+            "📊 Статистика сервера", "🏆 Лидерборд", "🎮 Игровые комнаты",
+            "📈 Аналитика патча", "📋 Мониторинг изменений", "🎯 Ищу подъём",
+            "🤝 Система наставников", "🎭 Выберите роли интересов", "🤖 Панель управления ботом",
+            "🗑️ Очистка чата", "🛠 Панель модерации", "🎉 Ивенты и турниры",
+            "📅 Календарь сервера", "🎮 Гостевая зона", "🔧 Настройка голосовых комнат",
+            "📊 Мета недели: топ-5 героев по пикрейту",
+            "📊 Аналитика патча: кто выиграл, кто проиграл",
+        }
+        cleaned_pins = 0
+        for ch in list(guild.text_channels):
+            if not ch.category or ch.category.name not in BOT_CATEGORY_NAMES:
+                continue
+            try:
+                pins = await ch.pins()
+            except discord.Forbidden:
+                continue
+            for p in pins:
+                if p.author.id != me.id:
+                    continue
+                has_known_title = (p.embeds and p.embeds[0].title in known_pins)
+                has_buttons = bool(p.components)
+                if not has_known_title and not has_buttons:
+                    continue
+                # удалить пины со старыми кнопками (не из текущей конфигурации)
+                if has_buttons and has_known_title:
+                    # проверяем есть ли view для этого пина — если нет, удаляем
+                    pass
+                elif not has_known_title and has_buttons:
+                    try:
+                        await p.unpin()
+                        cleaned_pins += 1
+                    except discord.Forbidden:
+                        pass
+
         await ctx.send(
             f"Готово! Настроены: Начало, Арена, Стратегия, Игровое, Магазин, "
             f"Гости, Голосовые комнаты, Статистика, Модерация, верификация.\n"
-            f"Удалено лишних каналов: {deleted_count}.")
+            f"Удалено лишних каналов: {deleted_count}.\n"
+            f"Очищено устаревших пинов: {cleaned_pins}.")
 
 
 async def setup(bot: commands.Bot):
